@@ -66,6 +66,186 @@ def clean_url(url: str) -> str:
         return parsed._replace(query='&'.join(cleaned_params)).geturl()
     return parsed._replace(query='').geturl()
 
+
+# ========== LRCFetcher (Embedded lyrics engine from lrc_fetcher.py) ==========
+class LRCFetcher:
+    """Robust lyrics fetcher using ffprobe for metadata extraction."""
+    def __init__(self):
+        self.session = requests.Session() if HAS_REQUESTS else None
+        # Suppress SSL warnings when verify=False is used
+        if HAS_REQUESTS:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        self.ffprobe_cmd = self._find_ffprobe()
+        
+    def _find_ffprobe(self):
+        """Find ffprobe in PATH or common locations."""
+        if shutil.which("ffprobe"):
+            return "ffprobe"
+        # Check Winget packages (same pattern as ffmpeg)
+        local_appdata = os.environ.get("LOCALAPPDATA", "")
+        if local_appdata:
+            pattern = os.path.join(local_appdata, "Microsoft", "WinGet", "Packages", "**", "ffprobe.exe")
+            matches = glob.glob(pattern, recursive=True)
+            if matches:
+                return matches[0]
+        return None
+
+    def get_metadata(self, filepath):
+        """Extract Artist, Title, Album using ffprobe, fallback to filename."""
+        meta = {"artist": None, "title": None, "album": None}
+        
+        # 1. Try ffprobe if available
+        if self.ffprobe_cmd:
+            try:
+                cmd = [
+                    self.ffprobe_cmd,
+                    "-v", "quiet",
+                    "-print_format", "json",
+                    "-show_format",
+                    filepath
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
+                if result.returncode == 0:
+                    import json
+                    data = json.loads(result.stdout)
+                    tags = data.get("format", {}).get("tags", {})
+                    tags_lower = {k.lower(): v for k, v in tags.items()}
+                    
+                    meta["artist"] = tags_lower.get("artist") or tags_lower.get("album_artist")
+                    meta["title"] = tags_lower.get("title")
+                    meta["album"] = tags_lower.get("album")
+            except Exception:
+                pass
+
+        # 2. Fallback: Filename parsing
+        if not meta["artist"] or not meta["title"]:
+            filename = os.path.splitext(os.path.basename(filepath))[0]
+            # Remove leading track numbers (e.g., "01 " or "01. ")
+            clean_name = re.sub(r'^\d+[\s\.\-_]+', '', filename)
+            
+            parts = clean_name.split(" - ")
+            if len(parts) >= 2:
+                if not meta["artist"]: 
+                    meta["artist"] = parts[0].strip()
+                if not meta["title"]: 
+                    meta["title"] = " - ".join(parts[1:]).strip()
+            else:
+                if not meta["title"]: 
+                    meta["title"] = clean_name.strip()
+                
+        return meta
+
+    def _get_artist_candidates(self, artist_raw):
+        """Generate a list of artist variants to try."""
+        candidates = [artist_raw]
+        if "," in artist_raw: 
+            candidates.append(artist_raw.split(",")[0].strip())
+        if " & " in artist_raw: 
+            candidates.append(artist_raw.split(" & ")[0].strip())
+        if " x " in artist_raw.lower(): 
+            candidates.append(re.split(r" [xX] ", artist_raw)[0].strip())
+        
+        unique = []
+        for c in candidates:
+            if c and c not in unique: 
+                unique.append(c)
+        return unique
+
+    def fetch_lrc(self, artist, title, album, save_path):
+        """Fetch LRC from LRCLIB with fallback search strategies."""
+        if not artist or not title:
+            return False
+
+        candidates = self._get_artist_candidates(artist)
+        
+        for i, try_artist in enumerate(candidates):
+            # Retry logic for network errors
+            max_retries = 3
+            for retry in range(max_retries):
+                try:
+                    # Try exact match first
+                    url_get = "https://lrclib.net/api/get"
+                    params = {"artist_name": try_artist, "track_name": title}
+                    if album:
+                        params["album_name"] = album
+                    
+                    # Disable SSL verification to bypass certificate issues
+                    resp = self.session.get(url_get, params=params, timeout=15, verify=False)
+                    data = None
+                    
+                    if resp.status_code == 200:
+                        data = resp.json()
+                    elif resp.status_code == 404:
+                        # Search fallback
+                        url_search = "https://lrclib.net/api/search"
+                        q = f"{try_artist} {title}"
+                        resp_search = self.session.get(url_search, params={"q": q}, timeout=15, verify=False)
+                        if resp_search.status_code == 200:
+                            results = resp_search.json()
+                            if results:
+                                data = results[0]
+                    
+                    if data:
+                        lrc_content = data.get("syncedLyrics", "") or data.get("plainLyrics", "")
+                        
+                        if lrc_content:
+                            with open(save_path, "w", encoding="utf-8") as f:
+                                f.write(lrc_content)
+                            print(f"    {Colors.OKGREEN}✅ {os.path.basename(save_path)}{Colors.ENDC}")
+                            return True
+                    
+                    # If we got a response but no lyrics, don't retry
+                    break
+                        
+                except (requests.exceptions.SSLError, requests.exceptions.ConnectionError) as e:
+                    if retry < max_retries - 1:
+                        time.sleep(0.5)  # Brief pause before retry
+                        continue
+                    else:
+                        if i == len(candidates) - 1:
+                            print(f"    {Colors.WARNING}⚠️  Network error (try again later){Colors.ENDC}")
+                        break
+                except Exception as e:
+                    if i == len(candidates) - 1:
+                        print(f"    {Colors.WARNING}⚠️  Error: {str(e)[:50]}{Colors.ENDC}")
+                    break
+                
+        return False
+
+    def scan_folder(self, folder_path):
+        """Scan folder for audio files and fetch lyrics."""
+        folder = Path(folder_path)
+        if not folder.exists():
+            return
+
+        extensions = ['*.mp3', '*.flac', '*.m4a', '*.wav', '*.ogg']
+        files = []
+        for ext in extensions:
+            files.extend(list(folder.glob(ext)))
+            
+        if not files:
+            return
+
+        for filepath in files:
+            # Check if lrc exists
+            lrc_path = filepath.with_suffix(".lrc")
+            if lrc_path.exists():
+                continue
+                
+            meta = self.get_metadata(str(filepath))
+            artist = meta["artist"]
+            title = meta["title"]
+            album = meta["album"]
+            
+            if not artist or not title:
+                print(f"    {Colors.WARNING}⏭️  Skip: {filepath.name} (No metadata){Colors.ENDC}")
+                continue
+                
+            print(f"    🔍 {artist} - {title}")
+            self.fetch_lrc(artist, title, album, str(lrc_path))
+            time.sleep(0.3)  # Rate limiting
+
 class LibraryManager:
     def __init__(self, root_path):
         self.root = Path(root_path)
@@ -265,77 +445,28 @@ class MusicDownloader:
                         pass
 
     # ---------- lyrics & cleanup ----------
-    def _fetch_lrc_and_cleanup(self, folder, spinner):
-        """Find generated .info.json files, fetch lyrics, clean up json."""
-        if not HAS_REQUESTS:
-            return
-
+    def _post_process_downloads(self, folder, spinner):
+        """Clean .info.json and run robust lyrics fetcher."""
+        # 1. Cleanup Junk (Priority)
         jsons = glob.glob(os.path.join(folder, "*.info.json"))
         for json_path in jsons:
             try:
-                import json
-                with open(json_path, 'r', encoding='utf-8') as f:
-                    meta = json.load(f)
-                
-                artist = meta.get("artist") or meta.get("uploader")
-                title = meta.get("track") or meta.get("title")
-                album = meta.get("album") or meta.get("playlist_title") or "Unknown Album"
-                
-                if self.lyrics_mode and artist and title:
-                    self._get_lrc_from_api(artist, title, album, json_path)
-                
+                os.remove(json_path)
             except Exception as e:
-                pass
-            finally:
-                try:
-                    os.remove(json_path)
-                except:
-                    pass
+                print(f"  {Colors.FAIL}⚠️  Failed to cleanup {os.path.basename(json_path)}: {e}{Colors.ENDC}")
 
-    def _get_artist_candidates(self, artist_raw):
-        """Generate a list of artist variants to try."""
-        candidates = [artist_raw]
-        if "," in artist_raw: candidates.append(artist_raw.split(",")[0].strip())
-        if " & " in artist_raw: candidates.append(artist_raw.split(" & ")[0].strip())
-        if " x " in artist_raw.lower(): candidates.append(re.split(r" [xX] ", artist_raw)[0].strip())
-        unique = []
-        for c in candidates:
-            if c and c not in unique: unique.append(c)
-        return unique
-
-    def _get_lrc_from_api(self, artist, title, album, ref_path):
-        candidates = self._get_artist_candidates(artist)
-        
-        for i, try_artist in enumerate(candidates):
+        # 2. Fetch Lyrics (if enabled)
+        if self.lyrics_mode and HAS_REQUESTS:
             try:
-                # Try exact match first
-                url = "https://lrclib.net/api/get"
-                params = {"artist_name": try_artist, "track_name": title, "album_name": album}
-                resp = requests.get(url, params=params, timeout=5)
-                
-                data = None
-                if resp.status_code == 200:
-                    data = resp.json()
-                elif resp.status_code == 404:
-                    # Fallback search
-                    url_search = "https://lrclib.net/api/search"
-                    q = f"{try_artist} {title}"
-                    resp_s = requests.get(url_search, params={"q": q}, timeout=5)
-                    if resp_s.status_code == 200:
-                        results = resp_s.json()
-                        if results: data = results[0]
-
-                if data:
-                    lyrics = data.get("syncedLyrics", "") or data.get("plainLyrics", "")
-                    if lyrics:
-                        base = os.path.splitext(os.path.splitext(ref_path)[0])[0] 
-                        lrc_path = base + ".lrc"
-                        with open(lrc_path, "w", encoding="utf-8") as f:
-                            f.write(lyrics)
-                        print(f"  {Colors.OKGREEN}🎤 Lyrics saved for '{title}' (via {try_artist}){Colors.ENDC}")
-                        return # Success
-            except:
-                pass
+                fetcher = LRCFetcher()
+                spinner.stop(True)
+                print(f"  {Colors.OKCYAN}🔍 Scanning for lyrics...{Colors.ENDC}")
+                fetcher.scan_folder(folder)
+                spinner.start("Finalizing...")
+            except Exception as e:
+                import traceback
+                print(f"{Colors.FAIL}❌ Lyrics Engine Error: {e}{Colors.ENDC}")
+                traceback.print_exc()
 
     def cleanup_junk(self):
         """Recursively delete .info.json files in DOWNLOAD_ROOT"""
@@ -405,8 +536,8 @@ class MusicDownloader:
             spinner.start("Fixing covers...") # Restart spinner if it was stopped
             self._fix_all_covers(folder)
             
-            spinner.message = "Fetching lyrics..."
-            self._fetch_lrc_and_cleanup(folder, spinner)
+            spinner.message = "Post-processing (Lyrics & Cleanup)..."
+            self._post_process_downloads(folder, spinner)
             
             spinner.stop(True)
             return True
