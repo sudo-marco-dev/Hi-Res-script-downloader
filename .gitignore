@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# User-specific config (use config.json.example as template)
+config.json
+
+# Log files
+*.log
+batchdl.log
+
+# Temporary/personal scripts
+fix_script.py
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db

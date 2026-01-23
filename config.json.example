@@ -1,0 +1,10 @@
+{
+    "music_folder": "C:\\Users\\YourUsername\\Music\\batchdl",
+    "mp3_mode": false,
+    "music_only": false,
+    "lyrics_mode": true,
+    "cookies_browser": null,
+    "max_workers": 3,
+    "parallel_mode": true,
+    "filename_template": "%(playlist_index|00|)s %(title)s.%(ext)s"
+}
