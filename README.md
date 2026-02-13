@@ -1,99 +1,85 @@
-# Snowsky Retro Mini Music Manager (batchdl)
+# 🎵 Snowsky Retro Mini Music Manager (Batch Downloader)
 
-A powerful, terminal-based music downloader and library manager designed to fetch high-quality audio from YouTube and YouTube Music. It automatically handles metadata, cover art resizing, and lyrics fetching.
+A robust, terminal-based music downloader and manager powered by `yt-dlp`. Features batch downloading from playlists, metadata embedding, lyrics fetching, and a retro TUI.
 
-## Features
+## 🚀 Features
+- **Batch Download**: Supports YouTube Music playlists, albums, and single tracks.
+- **High Quality**: Downloads OPUS/AAC and converts to FLAC or MP3 (320kbps).
+- **Metadata**: Automatically embeds Cover Art, Artist, Title, and Album tags.
+- **Lyrics**: Fetches synced lyrics (`.lrc`) from LRCLIB.
+- **Retro UI**: A beautiful, text-based interface for easy management.
 
-*   **High-Quality Downloads**: Supports **FLAC** and **MP3** formats.
-*   **Smart Metadata**: Automatically tags files with Artist, Title, and Album.
-*   **Cover Art**: Embeds 500x500 square cover art into files.
-*   **Lyrics Integration**: Built-in fetcher downloads synchronized lyrics (`.lrc`) from LRCLIB.
-*   **Library Management**:
-    *   Organizes downloads into `Artist/Album/File` structure.
-    *   **Tree View**: Visualize your library in the terminal.
-    *   **Snowsky Playlists**: Copy tracks from your library to custom playlist folders.
-*   **Batch Processing**:
-    *   **Parallel Mode**: multithreaded downloads for speed.
-    *   **Queueing**: Queue multiple albums for a single artist.
-    *   **Playlist Support**: Download entire YouTube playlists.
-*   **Junk Cleanup**: Automatically removes temporary `.info.json` and cover image files.
+---
 
-## Prerequisites
+## 🛠️ Installation & Setup
 
-### 1. Python Libraries
-Install the required Python packages:
+### 1. Install Prerequisites
+You need the following installed on your system:
 
-```bash
-pip install yt-dlp rich requests
+- **Python 3.8+**: [Download Here](https://www.python.org/downloads/)
+- **Node.js (LTS Version)**: **REQUIRED** for YouTube signature solving.
+  - ⚠️ **IMPORTANT**: Do NOT use the "Current" (v25+) version. Use **LTS** (v24.x).
+  - Install via Winget: `winget install -e --id OpenJS.NodeJS.LTS`
+- **FFmpeg**: Required for audio conversion and metadata.
+  - Install via Winget: `winget install -e --id Gyan.FFmpeg`
+
+### 2. Install Python Dependencies
+Open your terminal in this folder and run:
+```powershell
+pip install -r requirements.txt
 ```
+*Note: It is recommended to use a virtual environment (`.venv`).*
 
-### 2. External Tools
-*   **FFmpeg**: Required for audio conversion and cover art processing.
-    *   Download from [ffmpeg.org](https://ffmpeg.org/download.html).
-    *   Ensure `ffmpeg` and `ffprobe` are in your system PATH.
-*   **yt-dlp**: The script wraps `yt-dlp`. It is recommended to have it installed via pip (as above), but the script can also use a standalone binary if available.
+### 3. Setup Cookies (Crucial for Music)
+To avoid "403 Forbidden" errors and age-restricted content issues:
+1.  Install a "Get cookies.txt LOCALLY" extension for your browser.
+2.  Log in to [music.youtube.com](https://music.youtube.com).
+3.  Export your cookies as `cookies.txt`.
+4.  Place `cookies.txt` in this script's folder.
 
-### 3. Optional: Browser Cookies
-To download age-restricted content or YouTube Premium quality (if you have an account), you can provide cookies:
-*   **Option A (`cookies.txt`)**: Place a Netscape-formatted `cookies.txt` file in the same directory as the script.
-*   **Option B (Browser)**: The script supports extracting cookies from your browser (e.g., Firefox, Chrome) if configured in `config.json`.
+---
 
-## Installation
+## 📖 Usage
 
-Clone the repository or download the `batchdl.py` script.
-
-## Configuration
-
-On the first run, the script will ask for a **Music Folder**. It will generate a `config.json` file where you can tweak settings:
-
-```json
-{
-    "music_folder": "C:\\Users\\...\\Music\\batchdl",
-    "mp3_mode": false,         // Set true for MP3, false for FLAC
-    "music_only": false,       // Filter for "Topic" channels only
-    "lyrics_mode": true,       // Fetch lyrics automatically
-    "cookies_browser": null,   // e.g. "firefox"
-    "max_workers": 2,          // Threads for parallel downloading
-    "parallel_mode": true      // Enable/Disable threading
-}
-```
-
-## Usage
-
-Run the script:
-
-```bash
+Run the script using Python:
+```powershell
 python batchdl.py
 ```
+*Or if using the virtual environment:*
+```powershell
+.venv\Scripts\python.exe batchdl.py
+```
 
-### Main Menu Options
+### Menu Options
+- **1**: Download single URL (Artist/Album auto-detection).
+- **2**: Download a Playlist URL.
+- **4**: Batch mode (Download multiple URLs from input).
+- **f**: Toggle "Music Only" filter (filters out video-only content).
+- **m**: Toggle Format (FLAC / MP3).
 
-1.  **Any URL → Artist/Album**: Download a single video or album. You will be prompted for an output folder name (e.g., "The Beatles/Abbey Road") and the URL.
-2.  **Playlist URL**: Download a YouTube playlist into the `Playlists/` folder.
-3.  **Snowsky Playlist**: "Copy" tracks from your existing downloaded library into a new Folder/Playlist without duplicating storage (virtual playlist creation style).
-4.  **Batch Artist**: Paste multiple album URLs for a single Artist to download them all in a queue.
-5.  **View Library**: Shows a tree view of your current downloads.
-6.  **Toggle Format**: Switch between FLAC and MP3.
-7.  **Music Only Filter**: Toggle `yt-dlp`'s match filter for "music" content.
-8.  **Lyrics Download**: Toggle the lyrics fetcher.
-9.  **Download Mode**: Toggle between Parallel (fast) and Single-Threaded (safer) modes.
+---
 
-## Troubleshooting
+## 🔧 Troubleshooting
 
-### `WinError 32` (File in use)
-*   Occurs if a file is trying to be renamed while still open. The script has built-in retries, but if it persists, try disabling **Parallel Mode** (Option `p` in menu).
+### ❌ "HTTP Error 403: Forbidden"
+**Cause**: YouTube has blocked your request or your cookies are invalid.
+**Fix**:
+1.  Delete the old `cookies.txt`.
+2.  Get a fresh `cookies.txt` from your browser (make sure you are logged in).
+3.  Restart the script.
 
-### Downloads Failing / 403 Forbidden
-*   YouTube throttles automated requests.
-*   **Fix**: Update `yt-dlp` (`pip install -U yt-dlp`).
-*   **Fix**: Use a `cookies.txt` file.
+### ❌ "Signature solving failed" / "Requested format is not available"
+**Cause**: Missing or incompatible Node.js. `yt-dlp` needs Node.js to decrypt YouTube's latest signature challenges.
+**Fix**:
+1.  Ensure Node.js is installed: `node --version`.
+2.  **Downgrade to LTS**: If you are on the "Current" version (e.g., v25.x), uninstall it and install the **LTS** version (v24.x or v22.x).
+    ```powershell
+    winget uninstall OpenJS.NodeJS
+    winget install OpenJS.NodeJS.LTS
+    ```
+3.  **Restart your terminal** after installing Node.js.
 
-### Lyrics not finding matches
-*   The internal `LRCFetcher` uses fuzzy matching. Ensure your files have correct "Artist - Title" metadata or filenames.
-*   It queries `lrclib.net`. Network issues may prevent fetching.
-
-### "Rich library not found"
-*   The script runs in a fallback "Legacy Mode" without `rich`, but it looks much better with it. Install it via `pip install rich`.
-
-## License
-MIT
+### ❌ "ImportError: No module named 'requests' / 'rich'"
+**Cause**: Dependencies are not installed in the current environment.
+**Fix**:
+Run `pip install -r requirements.txt`. If you are using a virtual environment, ensure it is activated or call the python executable inside `.venv`.

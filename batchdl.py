@@ -141,8 +141,65 @@ CONF_MANAGER = ConfigManager()
 CONFIG = CONF_MANAGER.config
 DOWNLOAD_ROOT = CONFIG["music_folder"]
 
-YT_DLP_CMD = "yt-dlp"
+def find_yt_dlp():
+    # 1. Check in the same directory as the python executable (Scripts/ or bin/)
+    # This helps when running from a venv without activation
+    if sys.platform == "win32":
+        candidate = os.path.join(os.path.dirname(sys.executable), "yt-dlp.exe")
+        if os.path.exists(candidate):
+            return candidate
+        # Also check Scripts if we are in the root of venv? 
+        # Usually sys.executable IS in Scripts on Windows venv.
+    else:
+        candidate = os.path.join(os.path.dirname(sys.executable), "yt-dlp")
+        if os.path.exists(candidate):
+            return candidate
+
+    # 2. Check in script directory (portable usage)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if sys.platform == "win32":
+        local_exe = os.path.join(script_dir, "yt-dlp.exe")
+    else:
+        local_exe = os.path.join(script_dir, "yt-dlp")
+    
+    if os.path.exists(local_exe):
+        return local_exe
+        
+    # 3. Fallback to PATH
+    import shutil
+    if shutil.which("yt-dlp"):
+         return "yt-dlp"
+         
+    return "yt-dlp" # Hope for the best
+
+    return "yt-dlp" # Hope for the best
+
+YT_DLP_CMD = find_yt_dlp()
 FFMPEG_CMD = "ffmpeg"
+
+def _check_node_js():
+    """Ensure Node.js is in PATH for yt-dlp."""
+    if shutil.which("node"):
+        return
+
+    # Common Windows install locations
+    common_paths = [
+        os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "nodejs"),
+        os.path.join(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"), "nodejs"),
+    ]
+    
+    for p in common_paths:
+        node_exe = os.path.join(p, "node.exe")
+        if os.path.exists(node_exe):
+            print(f"✅ Found Node.js: {node_exe}")
+            print(f"   Adding to PATH...")
+            os.environ["PATH"] += os.pathsep + p
+            return
+
+    print(f"⚠️  Node.js not found in PATH or common locations.")
+    print(f"   yt-dlp requires Node.js for signature solving.")
+
+_check_node_js()
 
 # ========== UI & SPINNER ==========
 class Spinner:
@@ -899,12 +956,14 @@ class MusicDownloader:
             simple_pattern = re.compile(r'\[download\]\s+(\d+\.?\d*)%')
             
             # Read stdout dynamically
+            full_output = []
             while True:
                 line = process.stdout.readline()
                 if not line and process.poll() is not None:
                     break
                 
                 if line:
+                    full_output.append(line)
                     line_clean = line.strip()
                     # Check for detailed progress first
                     try:
@@ -942,7 +1001,8 @@ class MusicDownloader:
                     # Also check for "Destination: ..." to identify current file?
                     # Keep it simple for now.
 
-            stdout, _ = process.communicate() # get remaining
+            # stdout, _ = process.communicate() # get remaining
+            stdout = "".join(full_output)
             
             if process.returncode != 0:
                 if not quiet: spinner.stop(False)
