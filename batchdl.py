@@ -29,7 +29,7 @@ except ImportError:
 # ========== DEPENDENCY CHECK ==========
 try:
     from rich.console import Console
-    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
+    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn, ProgressColumn
     from rich.panel import Panel
     from rich.table import Table
     from rich.tree import Tree
@@ -41,6 +41,26 @@ except ImportError:
     print("⚠️  'rich' library not found. Installing is recommended for best experience.")
     print("   Run: pip install rich")
     # We will fallback to basic print where possible or exit if critical
+
+# ========== CUSTOM PROGRESS COLUMN ==========
+if HAS_RICH:
+    class InfoColumn(ProgressColumn):
+        """Custom column to display download speed and ETA from yt-dlp."""
+        
+        def render(self, task):
+            """Render speed and ETA info."""
+            speed = task.fields.get("speed", "")
+            eta = task.fields.get("eta", "")
+            
+            if speed and eta:
+                return Text(f"{speed} • ETA {eta}", style="dim cyan")
+            elif speed:
+                return Text(speed, style="dim cyan")
+            elif eta:
+                return Text(f"ETA {eta}", style="dim cyan")
+            else:
+                return Text("", style="dim cyan")
+
 
 # ========== LOGGING SETUP ==========
 logging.basicConfig(
@@ -303,13 +323,39 @@ class Colors:
     ENDC = '\033[0m'
     BOLD = '\033[1m'
 
+def safe_file_op(func, *args, retries=3, delay=0.5, **kwargs):
+    """Gracefully handle WinError 32 (file in use) with retries."""
+    for i in range(retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            if i == retries - 1:
+                logging.warning(f"File op failed after {retries} attempts: {e}")
+                raise
+            time.sleep(delay)
+    return None
+
 def clean_url(url: str) -> str:
+    """Clean URL by removing tracking parameters while preserving video/playlist IDs."""
     parsed = urlparse(url.strip())
-    if 'music.youtube.com' in parsed.netloc:
-        query_params = parsed.query.split('&')
-        cleaned_params = [p for p in query_params if not p.startswith('si=')]
-        return parsed._replace(query='&'.join(cleaned_params)).geturl()
-    return parsed._replace(query='').geturl()
+    if not parsed.query:
+        return url.strip()
+    
+    # Parameters to KEEP: v (video), list (playlist), index (track position)
+    keep = {'v', 'list', 'index'}
+    
+    # Use parse_qs for robust parsing
+    from urllib.parse import parse_qs, urlencode
+    qs = parse_qs(parsed.query)
+    filtered = {k: v for k, v in qs.items() if k in keep}
+    
+    if not filtered:
+        # If no essential params, strip tracking entirely for YouTube
+        if 'youtube' in parsed.netloc or 'youtu.be' in parsed.netloc:
+             return parsed._replace(query='').geturl()
+        return url.strip()
+
+    return parsed._replace(query=urlencode(filtered, doseq=True)).geturl()
 
 
 # ========== LRCFetcher (Embedded lyrics engine from lrc_fetcher.py) ==========
@@ -616,19 +662,33 @@ class MusicDownloader:
 
 
     # ---------- yt-dlp ----------
+    def _find_cookies_file(self):
+        """Auto-detect cookies.txt next to the script."""
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        cookies_path = os.path.join(script_dir, "cookies.txt")
+        if os.path.exists(cookies_path):
+            return cookies_path
+        return None
+
     def _yt_dlp_cmd(self, outtmpl, url, fmt="mp3"):
         # Base command builder (Shared)
         cmd = [
             YT_DLP_CMD,
             "--no-warnings",
             "--ignore-errors",
+            "--no-cache-dir",      # Help avoid some 403/throttling issues
             "--extract-audio",
-            "--write-info-json",  # Required for accurate lyrics
+            "--write-info-json",   # Required for accurate lyrics
             "--add-metadata",
+            "--windows-filenames", # Ensure compatible filenames
+            "--js-runtimes", "node",  # Use Node.js for YouTube JS signature solving
         ]
         
-        # Cookie Config
-        if CONFIG.get("cookies_browser"):
+        # Cookie Config: cookies.txt file > cookies_browser config
+        cookies_file = self._find_cookies_file()
+        if cookies_file:
+            cmd.extend(["--cookies", cookies_file])
+        elif CONFIG.get("cookies_browser"):
             cmd.extend(["--cookies-from-browser", CONFIG["cookies_browser"]])
 
         if self.music_only:
@@ -677,7 +737,7 @@ class MusicDownloader:
             tmp
         ]
         self._run(cmd)
-        os.replace(tmp, flac_path)
+        safe_file_op(os.replace, tmp, flac_path)
 
     def _find_best_thumbnail_for_trackbase(self, base_no_ext):
         candidates = [
@@ -737,12 +797,12 @@ class MusicDownloader:
             print(f"{Colors.FAIL}❌ Cover embed failed for {os.path.basename(filepath)}: {e}{Colors.ENDC}")
         finally:
             if os.path.exists(cover500):
-                os.remove(cover500)
+                safe_file_op(os.remove, cover500)
             for ext in (".jpg", ".webp", ".png"):
                 p = base + ext
                 if os.path.exists(p):
                     try:
-                        os.remove(p)
+                        safe_file_op(os.remove, p)
                     except:
                         pass
 
@@ -753,7 +813,7 @@ class MusicDownloader:
         jsons = glob.glob(os.path.join(folder, "*.info.json"))
         for json_path in jsons:
             try:
-                os.remove(json_path)
+                safe_file_op(os.remove, json_path)
             except Exception:
                 pass
 
@@ -811,10 +871,9 @@ class MusicDownloader:
         tmpl_str = CONFIG.get("filename_template", "%(playlist_index|00|)s %(title)s.%(ext)s")
         outtmpl = os.path.join(folder, tmpl_str)
         
-        # Try to clean up previous run's junk before starting (locking mitigation)
-        for f in glob.glob(os.path.join(folder, "*.part")):
-            try: os.remove(f)
-            except: pass
+        # yt-dlp handles its own resumes. Bulk deleting .part files in parallel mode
+        # causes threads to kill each other's downloads. 
+        # Removed unsafe cleanup loop.
 
         cmd = self._yt_dlp_cmd(outtmpl, link, "mp3" if self.mp3_mode else "flac")
         
@@ -824,7 +883,7 @@ class MusicDownloader:
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, 
+                stderr=subprocess.STDOUT, # Merge stderr into stdout to prevent pipe deadlock
                 text=True,
                 encoding='utf-8',
                 errors='replace',
@@ -832,7 +891,12 @@ class MusicDownloader:
             )
 
             # Regex for progress: [download]  45.0% of   3.45MiB at    2.00MiB/s ETA 00:01
-            progress_pattern = re.compile(r'\[download\]\s+(\d+\.\d+)%')
+            # Enhanced pattern to capture: percent, size, speed, ETA
+            progress_pattern = re.compile(
+                r'\[download\]\s+(\d+\.?\d*)%\s+of\s+~?(\S+)\s+at\s+(\S+)\s+ETA\s+(\S+)'
+            )
+            # Fallback pattern for just percentage (when other fields aren't available)
+            simple_pattern = re.compile(r'\[download\]\s+(\d+\.?\d*)%')
             
             # Read stdout dynamically
             while True:
@@ -842,42 +906,68 @@ class MusicDownloader:
                 
                 if line:
                     line_clean = line.strip()
-                    # Check for progress
-                    match = progress_pattern.search(line_clean)
-                    if match:
-                        percent = float(match.group(1))
-                        # Update progress
-                        if progress and task_id:
-                            # If playlist, yt-dlp resets 0-100 multiple times. 
-                            # Just show current file %? Or just indefinite?
-                            # For single song, 0-100 is fine.
-                            # For playlist, might be jumping around. 
-                            # Let's show: "⬇️ 45% Song Name" (if we can parse song name)
-                            progress.update(task_id, description=f"⬇️ {os.path.basename(folder)} ({percent}%)")
+                    # Check for detailed progress first
+                    try:
+                        match = progress_pattern.search(line_clean)
+                        if match:
+                            percent = float(match.group(1))
+                            size = match.group(2)
+                            speed = match.group(3)
+                            eta = match.group(4)
+                            
+                            # Update progress with all fields
+                            if progress and task_id:
+                                progress.update(
+                                    task_id, 
+                                    completed=percent,
+                                    description=f"⬇️ {os.path.basename(folder)}",
+                                    speed=speed,
+                                    eta=eta
+                                )
+                        else:
+                            # Try simple pattern as fallback
+                            simple_match = simple_pattern.search(line_clean)
+                            if simple_match:
+                                percent = float(simple_match.group(1))
+                                if progress and task_id:
+                                    progress.update(
+                                        task_id, 
+                                        completed=percent,
+                                        description=f"⬇️ {os.path.basename(folder)}"
+                                    )
+                    except (ValueError, IndexError):
+                        # Regex parsing failed, continue without crashing
+                        pass
                     
                     # Also check for "Destination: ..." to identify current file?
                     # Keep it simple for now.
 
-            stdout, stderr = process.communicate() # get remaining
+            stdout, _ = process.communicate() # get remaining
             
             if process.returncode != 0:
                 if not quiet: spinner.stop(False)
                 
-                # Check known "Skip" conditions from stderr
-                # Note: we need to allow stderr reading too. `communicate` handles it after loop.
-                err_lower = stderr.lower() if stderr else ""
+                # Combined output is in stdout now
+                out_lower = stdout.lower() if stdout else ""
                 
-                if "does not match filter" in err_lower:
+                # Check if some files were still produced despite errors (common in playlists)
+                produced_files = any(f.endswith('.flac') or f.endswith('.mp3') for f in os.listdir(folder))
+                
+                if "does not match filter" in out_lower:
                     if not quiet: print(f"{Colors.WARNING}⏭️  Skipped (Not a music track/filter mismatch){Colors.ENDC}")
-                    return True 
-                elif "video unavailable" in err_lower:
-                    if not quiet: print(f"{Colors.WARNING}⏭️  Skipped (Video Unavailable/Copyright Blocked){Colors.ENDC}")
+                    # Don't return yet, might have other files in playlist
+                elif "video unavailable" in out_lower or "403" in out_lower:
+                    if not quiet: print(f"{Colors.WARNING}⏭️  Skipped (Unavailable/Forbidden - Check Cookies){Colors.ENDC}")
                 else:
                     if not quiet: 
                         print(f"{Colors.FAIL}❌ yt-dlp warning/error:{Colors.ENDC}")
-                        print(stderr)
-                    logging.error(f"yt-dlp error for {link}: {stderr}")
-            
+                        print(stdout)
+                    logging.error(f"yt-dlp error for {link}: {stdout}")
+                
+                # If nothing was downloaded at all and it's a hard error, return
+                if not produced_files:
+                    return False
+
             if not quiet: spinner.start("Fixing covers...") 
             elif progress and task_id: progress.update(task_id, description=f"🖼️ Covers: {os.path.basename(folder)}")
             
@@ -922,7 +1012,7 @@ class MusicDownloader:
                 TextColumn("[bold cyan]{task.description}"),
                 BarColumn(),
                 TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                TimeRemainingColumn(),
+                InfoColumn(),
                 transient=False
             ) as progress:
                 
@@ -978,7 +1068,7 @@ class MusicDownloader:
                 self._run_download(folder, url)
 
     def _parallel_worker(self, folder, url, progress):
-        task_id = progress.add_task(f"⏳ Waiting: {os.path.basename(folder)}", total=None)
+        task_id = progress.add_task(f"⏳ Waiting: {os.path.basename(folder)}", total=100, speed="", eta="")
         try:
             result = self._run_download(folder, url, quiet=True, progress=progress, task_id=task_id)
             return result
@@ -987,11 +1077,37 @@ class MusicDownloader:
 
     def download_single_url(self, folder_name, url):
         full_path = os.path.join(DOWNLOAD_ROOT, folder_name)
-        return self._run_download(full_path, url)
+        
+        if HAS_RICH:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold cyan]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                InfoColumn(),
+                transient=False
+            ) as progress:
+                task_id = progress.add_task(f"⬇️ {folder_name}", total=100, speed="", eta="")
+                return self._run_download(full_path, url, quiet=True, progress=progress, task_id=task_id)
+        else:
+            return self._run_download(full_path, url)
 
     def download_playlist_url(self, playlist_name, url):
         full_path = os.path.join(DOWNLOAD_ROOT, "Playlists", playlist_name)
-        return self._run_download(full_path, url)
+        
+        if HAS_RICH:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[bold cyan]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                InfoColumn(),
+                transient=False
+            ) as progress:
+                task_id = progress.add_task(f"⬇️ {playlist_name}", total=100, speed="", eta="")
+                return self._run_download(full_path, url, quiet=True, progress=progress, task_id=task_id)
+        else:
+            return self._run_download(full_path, url)
 
     # ---------- library display ----------
     # ---------- library display ----------
