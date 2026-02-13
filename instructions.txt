@@ -1,0 +1,41 @@
+# Snowsky Modern Stack - Run Instructions
+
+## Prerequisites
+1.  **Python 3.10+** (for Backend)
+2.  **Node.js 18+** (for Frontend)
+
+## 1. Backend Setup (FastAPI)
+
+1.  Open a terminal in the root `myscripts` folder.
+2.  Create a virtual environment (optional but recommended):
+    ```bash
+    python -m venv .venv
+    .\.venv\Scripts\activate
+    ```
+3.  Install dependencies (ensure you have a `requirements.txt` or install manually):
+    ```bash
+    pip install fastapi uvicorn requests
+    # If a backend-specific requirements.txt exists, use that.
+    ```
+4.  Run the server:
+    ```bash
+    uvicorn backend.main:app --reload --port 8000
+    ```
+5.  Check Health: Open [http://localhost:8000/api/health](http://localhost:8000/api/health)
+
+## 2. Frontend Setup (React + Vite)
+
+1.  Open a new terminal.
+2.  Navigate to the frontend folder:
+    ```bash
+    cd frontend
+    ```
+3.  Install dependencies:
+    ```bash
+    npm install
+    ```
+4.  Run the development server:
+    ```bash
+    npm run dev
+    ```
+5.  Open App: [http://localhost:5173](http://localhost:5173)
