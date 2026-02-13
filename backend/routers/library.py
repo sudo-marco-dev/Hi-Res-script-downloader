@@ -29,6 +29,7 @@ async def get_library():
             path=item.path,
             tracks=item.tracks,
             track_files=item.track_files,
+            cover_url=item.cover_url,
         ))
 
     return LibraryResponse(

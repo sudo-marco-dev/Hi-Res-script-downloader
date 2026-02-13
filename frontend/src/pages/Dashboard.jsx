@@ -36,27 +36,46 @@ export default function Dashboard() {
         }
     }, [progress]);
 
-    const startTestDownload = async () => {
-        // Quick test download
+    const [url, setUrl] = useState('');
+    const [folder, setFolder] = useState('');
+    const [format, setFormat] = useState('flac');
+    const [submitting, setSubmitting] = useState(false);
+
+    const handleDownload = async (e) => {
+        e.preventDefault();
+        if (!url || !folder) {
+            toast.error('Please fill in all fields');
+            return;
+        }
+
+        setSubmitting(true);
         try {
             const res = await fetch('/api/download/single', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    url: 'https://music.youtube.com/watch?v=3eeIu7N7xS0',
-                    folder_name: 'Test Downloads',
-                    format: 'flac'
+                    url,
+                    folder_name: folder,
+                    format
                 })
             });
             const data = await res.json();
-            if (data.status === 'started') toast.success('Download started!');
+            if (data.status === 'started') {
+                toast.success('Download started!');
+                setUrl('');
+                setFolder('');
+            } else {
+                toast.error('Failed to start');
+            }
         } catch (e) {
-            toast.error('Failed to start download');
+            toast.error('Network error');
+        } finally {
+            setSubmitting(false);
         }
     };
 
     return (
-        <div className="p-8 space-y-8">
+        <div className="p-8 space-y-8 max-w-7xl mx-auto">
             <header className="flex justify-between items-center">
                 <div>
                     <h1 className="text-3xl font-bold">Dashboard</h1>
@@ -76,30 +95,83 @@ export default function Dashboard() {
                 <HealthCard label="Cookies" status={health?.cookies_found} />
             </div>
 
-            {/* Active Downloads */}
-            <div className="bg-surface rounded-2xl p-6 border border-white/5">
-                <div className="flex justify-between items-center mb-6">
-                    <h2 className="text-xl font-bold flex items-center gap-2">
-                        <FaDownload className="text-primary" /> Active Downloads
-                    </h2>
-                    <button
-                        onClick={startTestDownload}
-                        className="px-4 py-2 bg-primary hover:bg-primary/80 transition rounded-lg text-sm font-medium"
-                    >
-                        Start Test Download
-                    </button>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                {/* Download Form */}
+                <div className="lg:col-span-1">
+                    <div className="bg-surface rounded-2xl p-6 border border-white/5 h-full">
+                        <h2 className="text-xl font-bold mb-6 flex items-center gap-2">
+                            <FaDownload className="text-primary" /> New Download
+                        </h2>
+                        <form onSubmit={handleDownload} className="space-y-4">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-300 mb-1">URL</label>
+                                <input
+                                    type="text"
+                                    value={url}
+                                    onChange={(e) => setUrl(e.target.value)}
+                                    placeholder="https://..."
+                                    className="w-full bg-background/50 border border-white/10 rounded-lg px-3 py-2 focus:outline-none focus:border-primary"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-300 mb-1">Folder Name</label>
+                                <input
+                                    type="text"
+                                    value={folder}
+                                    onChange={(e) => setFolder(e.target.value)}
+                                    placeholder="e.g. Artist - Album"
+                                    className="w-full bg-background/50 border border-white/10 rounded-lg px-3 py-2 focus:outline-none focus:border-primary"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-300 mb-1">Format</label>
+                                <div className="flex bg-background/50 rounded-lg p-1 border border-white/10">
+                                    <button
+                                        type="button"
+                                        onClick={() => setFormat('flac')}
+                                        className={`flex-1 py-1 rounded text-sm font-medium transition-colors ${format === 'flac' ? 'bg-primary text-white' : 'text-gray-400 hover:text-white'}`}
+                                    >
+                                        FLAC
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setFormat('mp3')}
+                                        className={`flex-1 py-1 rounded text-sm font-medium transition-colors ${format === 'mp3' ? 'bg-primary text-white' : 'text-gray-400 hover:text-white'}`}
+                                    >
+                                        MP3
+                                    </button>
+                                </div>
+                            </div>
+                            <button
+                                type="submit"
+                                disabled={submitting}
+                                className="w-full bg-primary hover:bg-primary/80 text-white font-bold py-3 rounded-xl mt-2 transition-all disabled:opacity-50"
+                            >
+                                {submitting ? 'Starting...' : 'Start Download'}
+                            </button>
+                        </form>
+                    </div>
                 </div>
 
-                <div className="space-y-4">
-                    {jobs.length === 0 ? (
-                        <div className="text-center py-12 text-gray-500">
-                            No active downloads
+                {/* Active Downloads */}
+                <div className="lg:col-span-2">
+                    <div className="bg-surface rounded-2xl p-6 border border-white/5 h-full">
+                        <h2 className="text-xl font-bold mb-6 flex items-center gap-2">
+                            <FaServer className="text-gray-400" /> Active Jobs
+                        </h2>
+
+                        <div className="space-y-4 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
+                            {jobs.length === 0 ? (
+                                <div className="text-center py-12 text-gray-500 border border-dashed border-white/10 rounded-xl">
+                                    No active downloads
+                                </div>
+                            ) : (
+                                jobs.slice().reverse().map(job => (
+                                    <JobRow key={job.job_id} job={job} />
+                                ))
+                            )}
                         </div>
-                    ) : (
-                        jobs.map(job => (
-                            <JobRow key={job.job_id} job={job} />
-                        ))
-                    )}
+                    </div>
                 </div>
             </div>
         </div>

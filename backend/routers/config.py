@@ -16,7 +16,7 @@ async def get_config():
     return ConfigResponse(**cfg)
 
 
-@router.put("", response_model=ConfigResponse)
+@router.patch("", response_model=ConfigResponse)
 async def update_config(updates: ConfigUpdate):
     """Apply partial config updates."""
     # Filter out None values to only update provided fields
