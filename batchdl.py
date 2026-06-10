@@ -1564,16 +1564,40 @@ def main():
             choice = choice.lower().strip()
 
             if choice == "1":
+                # Ask for URL first so we can auto-fetch the title
                 if HAS_RICH:
-                    folder_name = Console().input("[bold yellow]📁 Folder name (Artist/Album): [/]").strip()
                     link = Console().input("[bold yellow]🔗 YouTube/YT Music URL: [/]").strip()
                 else:
-                    folder_name = input("📁 Folder name (Artist/Album): ").strip()
                     link = input("🔗 YouTube/YT Music URL: ").strip()
-                    
-                if folder_name and link:
-                    downloader.download_single_url(folder_name, link)
-                    downloader.library = LibraryManager(DOWNLOAD_ROOT)
+
+                if link:
+                    fetched_title = None
+                    spinner = Spinner()
+                    spinner.start("🔍 Fetching title…")
+                    try:
+                        fetched_title = downloader._fetch_playlist_title(link)
+                    finally:
+                        spinner.stop(fetched_title is not None)
+
+                    if fetched_title:
+                        print(f"{Colors.OKCYAN}📁 Detected title: {Colors.OKGREEN}{fetched_title}{Colors.ENDC}")
+                        if HAS_RICH:
+                            custom = Console().input(
+                                f"[bold yellow]📁 Folder name [Enter to use '{fetched_title}']: [/]"
+                            ).strip()
+                        else:
+                            custom = input(f"📁 Folder name [Enter to use '{fetched_title}']: ").strip()
+                        folder_name = custom if custom else fetched_title
+                    else:
+                        print(f"{Colors.WARNING}⚠️  Could not auto-fetch title. Please enter one manually.{Colors.ENDC}")
+                        if HAS_RICH:
+                            folder_name = Console().input("[bold yellow]📁 Folder name (Artist/Album): [/]").strip()
+                        else:
+                            folder_name = input("📁 Folder name (Artist/Album): ").strip()
+
+                    if folder_name:
+                        downloader.download_single_url(folder_name, link)
+                        downloader.library = LibraryManager(DOWNLOAD_ROOT)
 
             elif choice == "2":
                 # Ask for URL first so we can auto-fetch the title
@@ -1630,23 +1654,40 @@ def main():
                     artist_name = input("🎤 Artist Name: ").strip()
                     
                 if artist_name:
-                    print(f"{Colors.OKCYAN}Paste album URLs. Input 'Album Name' then 'URL'.")
-                    print(f"Type 'GO' when finished.{Colors.ENDC}")
+                    print(f"{Colors.OKCYAN}Paste album URLs one at a time. Type 'GO' when finished.{Colors.ENDC}")
                     
                     queue = []
                     while True:
-                        alb = input("💿 Album Name (or 'GO'): ").strip()
-                        if alb.upper() == "GO":
+                        lnk = input("🔗 Album URL (or 'GO'): ").strip()
+                        if lnk.upper() == "GO":
                             break
-                        if not alb:
-                            continue
-                        lnk = input("🔗 URL: ").strip()
                         if not lnk:
                             continue
-                        
+
+                        # Auto-fetch album title
+                        fetched_alb = None
+                        spinner = Spinner()
+                        spinner.start("🔍 Fetching album title…")
+                        try:
+                            fetched_alb = downloader._fetch_playlist_title(lnk)
+                        finally:
+                            spinner.stop(fetched_alb is not None)
+
+                        if fetched_alb:
+                            print(f"{Colors.OKCYAN}💿 Detected album: {Colors.OKGREEN}{fetched_alb}{Colors.ENDC}")
+                            alb = input(f"💿 Album name [Enter to use '{fetched_alb}']: ").strip()
+                            alb = alb if alb else fetched_alb
+                        else:
+                            print(f"{Colors.WARNING}⚠️  Could not auto-fetch album title.{Colors.ENDC}")
+                            alb = input("💿 Album Name: ").strip()
+
+                        if not alb:
+                            continue
+
                         # Fix: Use Absolute Path for Batch Downloads
                         full_album_path = os.path.join(DOWNLOAD_ROOT, artist_name, alb)
                         queue.append((full_album_path, lnk))
+                        print(f"{Colors.OKGREEN}  ✅ Queued: {artist_name} / {alb}{Colors.ENDC}")
                     
                     if queue:
                         downloader.download_queue_parallel(queue)
