@@ -265,6 +265,94 @@ class Spinner:
             status = f"{Colors.OKGREEN}✅ COMPLETE{Colors.ENDC}" if success else f"{Colors.FAIL}❌ FAILED{Colors.ENDC}"
             print(f'\r{status:>20} {self.message}')
 
+class LiveStatus:
+    """Simple, honest live status feed for a single download.
+
+    Renders a numbered "track N of M" list that updates in place while
+    downloading and commits to a new line whenever state actually changes.
+    No fake percentages, no bar that can get stuck.
+    """
+
+    # ANSI escape codes
+    _CLEAR_EOL = "\x1b[K"      # clear from cursor to end of line
+    _MOVE_UP = "\x1b[A"        # move cursor up one line
+    _HIDE_CURSOR = "\x1b[?25l"
+    _SHOW_CURSOR = "\x1b[?25h"
+
+    def __init__(self, header=None, total=1, stream=None):
+        self.header = header
+        self.total = max(int(total or 1), 1)
+        self._stream = stream or sys.stdout
+        self._current_line_printed = False
+        self._last_status_line = ""  # remember for in-place updates
+        self._lock = threading.Lock()
+
+    def _print_header(self):
+        if self.header:
+            self._stream.write(f"{Colors.OKCYAN}{self.header}{Colors.ENDC}\n")
+            self._stream.flush()
+
+    def log(self, msg):
+        """Print a status line that is NOT a per-track update."""
+        with self._lock:
+            if self._current_line_printed:
+                # Erase the in-place line first, then print the new one
+                self._stream.write(f"\r{self._CLEAR_EOL}\n{msg}\n")
+                self._current_line_printed = False
+            else:
+                self._stream.write(f"{msg}\n")
+            self._stream.flush()
+        print(f"{msg}", flush=True)  # also to log
+
+    def start_track(self, idx, title, total=None):
+        """Show that a new track has started downloading."""
+        with self._lock:
+            if total:
+                self.total = max(int(total), 1)
+            line = f"  {Colors.WARNING}🎵 [{idx}/{self.total}]{Colors.ENDC} {title} {Colors.OKCYAN}downloading…{Colors.ENDC}"
+            if self._current_line_printed:
+                self._stream.write(f"\r{self._CLEAR_EOL}\n{line}\n")
+            else:
+                self._print_header()
+                self._stream.write(f"{line}\n")
+            self._last_status_line = line
+            self._current_line_printed = True
+            self._stream.flush()
+
+    def finish_track(self, idx, title, size_str=""):
+        """Show that the current track finished and was saved."""
+        with self._lock:
+            size_part = f" {Colors.OKGREEN}({size_str}){Colors.ENDC}" if size_str else ""
+            line = f"  {Colors.OKGREEN}✅ [{idx}/{self.total}]{Colors.ENDC} {title} {Colors.OKGREEN}saved{size_part}{Colors.ENDC}"
+            if self._current_line_printed:
+                self._stream.write(f"\r{self._CLEAR_EOL}\n{line}\n")
+            else:
+                self._stream.write(f"{line}\n")
+            self._last_status_line = line
+            self._current_line_printed = False  # next call will commit, not overwrite
+            self._stream.flush()
+
+    def update_status(self, text):
+        """Refresh the current 'downloading…' line in place with a sub-status."""
+        with self._lock:
+            if not self._current_line_printed:
+                return
+            self._last_status_line = text
+            self._stream.write(f"\r{self._CLEAR_EOL}{text}")
+            self._stream.flush()
+
+    def finish(self, ok=True, elapsed_s=None):
+        """Print a final summary line for this download."""
+        with self._lock:
+            if self._current_line_printed:
+                self._stream.write(f"\r{self._CLEAR_EOL}\n")
+                self._current_line_printed = False
+            if elapsed_s is not None:
+                sym = "🎉" if ok else "❌"
+                self._stream.write(f"  {sym} Done in {elapsed_s:.1f}s\n")
+            self._stream.flush()
+
+
 class SnowskyUI:
     """Rich TUI Manager"""
     def __init__(self):
@@ -933,266 +1021,430 @@ class MusicDownloader:
         mb_saved = deleted_size / (1024 * 1024)
         print(f"{Colors.OKGREEN}✅ Cleanup Complete! Deleted {count} files ({mb_saved:.2f} MB freed).{Colors.ENDC}")
 
+    # ---------- yt-dlp line parser ----------
+    # Recognized event types for the multi-signal progress system.
+    # Each event: ("TYPE", payload_dict)
+    progress_pattern = re.compile(
+        r'\[download\]\s+(\d+\.?\d*)%\s+of\s+~?(\S+)\s+at\s+(\S+)\s+ETA\s+(\S+)'
+    )
+    simple_pattern = re.compile(r'\[download\]\s+(\d+\.?\d*)%')
+    YT_PATTERN_PLAYLIST = re.compile(
+        r'\[download\]\s+Downloading\s+playlist:\s+(.+?)(?:\s*-\s*(\d+)\s+videos?)?$',
+        re.IGNORECASE
+    )
+    YT_PATTERN_ITEM = re.compile(
+        r'\[download\]\s+Downloading\s+item\s+(\d+)\s+of\s+(\d+)',
+        re.IGNORECASE
+    )
+    YT_PATTERN_DESTINATION = re.compile(
+        r'\[ExtractAudio\]\s+Destination:\s+(.+)$',
+        re.IGNORECASE
+    )
+    YT_PATTERN_EXTRACTING = re.compile(
+        r'\[youtube\]\s+Extracting\s+URL',
+        re.IGNORECASE
+    )
+    YT_PATTERN_POSTPROCESS = re.compile(
+        r'\[(?:Fixup|EmbedSubtitle|Metadata|ThumbnailsConvertor|Exec)',
+        re.IGNORECASE
+    )
+
+    def _parse_ytdlp_line(self, line):
+        """Return (event_type, payload) tuple, or (None, None) if unrecognized."""
+        s = line.strip()
+        if not s:
+            return (None, None)
+
+        # Detailed progress: [download]  45.0% of   3.45MiB at    2.00MiB/s ETA 00:01
+        m = self.progress_pattern.search(s)
+        if m:
+            try:
+                return ("DOWNLOAD_PCT", {
+                    "percent": float(m.group(1)),
+                    "speed": m.group(3),
+                    "eta": m.group(4),
+                })
+            except (ValueError, IndexError):
+                pass
+
+        # Simple percent fallback: [download]  12.0%
+        m = self.simple_pattern.search(s)
+        if m:
+            try:
+                return ("DOWNLOAD_PCT", {
+                    "percent": float(m.group(1)),
+                    "speed": "",
+                    "eta": "",
+                })
+            except ValueError:
+                pass
+
+        # Per-item counter in a playlist
+        m = self.YT_PATTERN_ITEM.search(s)
+        if m:
+            return ("ITEM_START", {
+                "index": int(m.group(1)),
+                "total": int(m.group(2)),
+            })
+
+        # Playlist header
+        m = self.YT_PATTERN_PLAYLIST.search(s)
+        if m:
+            return ("PLAYLIST_START", {
+                "name": m.group(1).strip(),
+                "count": int(m.group(2)) if m.group(2) else 0,
+            })
+
+        # Audio extraction finished
+        m = self.YT_PATTERN_DESTINATION.search(s)
+        if m:
+            return ("EXTRACT", {
+                "destination": m.group(1).strip(),
+            })
+
+        # Phase hints
+        if self.YT_PATTERN_EXTRACTING.search(s):
+            return ("PHASE", {"name": "🔍 Extracting URL…"})
+        if "[youtube]" in s.lower() and "downloading webpage" in s.lower():
+            return ("PHASE", {"name": "🌐 Fetching webpage…"})
+        if "[youtube]" in s.lower() and ("downloading m3u8" in s.lower() or "downloading manifest" in s.lower()):
+            return ("PHASE", {"name": "📜 Fetching manifest…"})
+        if "generic" in s.lower() and "extracting" in s.lower():
+            return ("PHASE", {"name": "🔧 Resolving formats…"})
+        if self.YT_PATTERN_POSTPROCESS.search(s):
+            return ("PHASE", {"name": "⚙️ Post-processing…"})
+
+        return (None, None)
+
     # ---------- execution wrapper ----------
     def _run_download(self, folder, link, playlist_mode=False, quiet=False, progress=None, task_id=None):
         os.makedirs(folder, exist_ok=True)
         link = clean_url(link)
         fmt = "MP3" if self.mp3_mode else "FLAC"
-        filter_msg = " [Music Only]" if self.music_only else ""
-        
-        msg = f"Downloading → {os.path.basename(folder)} ({fmt})"
-        if not quiet:
-            print(f"{Colors.OKGREEN}🎵 {msg}{Colors.ENDC}")
-            print(f"{Colors.OKCYAN}🔗 {link}{Colors.ENDC}")
-            spinner = Spinner()
-            spinner.start(f"yt-dlp processing...")
+
+        # The caller can pass in a pre-created LiveStatus (used for the
+        # parallel batch flow), or we create one here for single downloads.
+        live = progress if isinstance(progress, LiveStatus) else None
+        owning_live = False
+        if live is None:
+            header = f"⬇️ {os.path.basename(folder)} ({fmt})"
+            if not quiet:
+                # quiet=False path: use the old Spinner so non-quiet keeps the
+                # current "yt-dlp processing..." style. We don't create a live
+                # feed in this mode (it would be redundant with the print()s).
+                print(f"{Colors.OKGREEN}🎵 {header}{Colors.ENDC}")
+                print(f"{Colors.OKCYAN}🔗 {link}{Colors.ENDC}")
+                spinner = Spinner()
+                spinner.start(f"yt-dlp processing…")
         elif progress and task_id:
+            # Legacy Rich path still works (compatibility)
             progress.update(task_id, description=f"⬇️ {os.path.basename(folder)} (yt-dlp)")
 
         # Template from Config
         tmpl_str = CONFIG.get("filename_template", "%(playlist_index|00|)s %(title)s.%(ext)s")
         outtmpl = os.path.join(folder, tmpl_str)
-        
-        # yt-dlp handles its own resumes. Bulk deleting .part files in parallel mode
-        # causes threads to kill each other's downloads. 
-        # Removed unsafe cleanup loop.
 
         cmd = self._yt_dlp_cmd(outtmpl, link, "mp3" if self.mp3_mode else "flac")
-        
-        # We need to capture stdout line by line for progress
-        # And stderr for errors.
+
+        start_ts = time.time()
+        # In live mode, the live object handles the header itself
+        if live:
+            live.log(f"{Colors.OKCYAN}🔗 {link}{Colors.ENDC}")
+
         try:
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, # Merge stderr into stdout to prevent pipe deadlock
+                stderr=subprocess.STDOUT,
                 text=True,
                 encoding='utf-8',
                 errors='replace',
-                bufsize=1 # Line buffered
+                bufsize=1,
             )
 
-            # Regex for progress: [download]  45.0% of   3.45MiB at    2.00MiB/s ETA 00:01
-            # Enhanced pattern to capture: percent, size, speed, ETA
-            progress_pattern = re.compile(
-                r'\[download\]\s+(\d+\.?\d*)%\s+of\s+~?(\S+)\s+at\s+(\S+)\s+ETA\s+(\S+)'
-            )
-            # Fallback pattern for just percentage (when other fields aren't available)
-            simple_pattern = re.compile(r'\[download\]\s+(\d+\.?\d*)%')
-            
-            # Read stdout dynamically
+            # Per-track state
             full_output = []
+            state = {
+                "item_index": 0,          # 0 until we know the playlist total
+                "item_total": 0,
+                "last_track_title": "",   # last track name we displayed
+            }
+
             while True:
                 line = process.stdout.readline()
                 if not line and process.poll() is not None:
                     break
-                
+
                 if line:
                     full_output.append(line)
-                    line_clean = line.strip()
-                    # Check for detailed progress first
-                    try:
-                        match = progress_pattern.search(line_clean)
-                        if match:
-                            percent = float(match.group(1))
-                            size = match.group(2)
-                            speed = match.group(3)
-                            eta = match.group(4)
-                            
-                            # Update progress with all fields
-                            if progress and task_id:
-                                progress.update(
-                                    task_id, 
-                                    completed=percent,
-                                    description=f"⬇️ {os.path.basename(folder)}",
-                                    speed=speed,
-                                    eta=eta
-                                )
-                        else:
-                            # Try simple pattern as fallback
-                            simple_match = simple_pattern.search(line_clean)
-                            if simple_match:
-                                percent = float(simple_match.group(1))
-                                if progress and task_id:
-                                    progress.update(
-                                        task_id, 
-                                        completed=percent,
-                                        description=f"⬇️ {os.path.basename(folder)}"
-                                    )
-                    except (ValueError, IndexError):
-                        # Regex parsing failed, continue without crashing
-                        pass
-                    
-                    # Also check for "Destination: ..." to identify current file?
-                    # Keep it simple for now.
+                    event_type, payload = self._parse_ytdlp_line(line)
+                    if event_type is None:
+                        continue
 
-            # stdout, _ = process.communicate() # get remaining
+                    if live is None:
+                        # Non-live (legacy Rich bar) or quiet=False path:
+                        # keep the old bar behavior so we don't regress.
+                        if progress and task_id and event_type == "DOWNLOAD_PCT":
+                            pct = payload.get("percent", 0.0)
+                            progress.update(
+                                task_id,
+                                completed=pct,
+                                description=f"⬇️ {os.path.basename(folder)}",
+                                speed=payload.get("speed", ""),
+                                eta=payload.get("eta", ""),
+                            )
+                        continue
+
+                    # ----- LiveStatus path -----
+                    if event_type == "PLAYLIST_START":
+                        if payload.get("count"):
+                            state["item_total"] = int(payload["count"])
+                        live.log(f"  📜 {payload.get('name', '')}")
+                        if state["item_total"]:
+                            live.log(f"  {Colors.OKCYAN}Found {state['item_total']} tracks{Colors.ENDC}")
+
+                    elif event_type == "ITEM_START":
+                        state["item_index"] = int(payload["index"])
+                        state["item_total"] = int(payload["total"])
+                        title = f"Track {state['item_index']}"
+                        live.start_track(state["item_index"], title, total=state["item_total"])
+
+                    elif event_type == "EXTRACT":
+                        dest = os.path.basename(payload.get("destination", ""))
+                        state["last_track_title"] = dest
+                        # Use whatever item_index we have; fall back to 1 for single URLs
+                        idx = state["item_index"] if state["item_index"] else 1
+                        total = state["item_total"] if state["item_total"] else 1
+                        try:
+                            size_str = self._human_size(dest)
+                        except Exception:
+                            size_str = ""
+                        live.finish_track(idx, dest, size_str=size_str)
+
+                    elif event_type == "PHASE":
+                        # Show phase above the in-place line if we have a current track
+                        if state["item_index"] and state["item_total"]:
+                            live.update_status(
+                                f"  {Colors.WARNING}🎵 [{state['item_index']}/{state['item_total']}]{Colors.ENDC} "
+                                f"{payload.get('name', '')}"
+                            )
+
+                    elif event_type == "DOWNLOAD_PCT":
+                        # Refine the in-place line with speed/ETA (when we have a track)
+                        if state["item_index"] and state["item_total"]:
+                            speed = payload.get("speed", "")
+                            eta = payload.get("eta", "")
+                            tail = f"{speed}" + (f" • ETA {eta}" if eta else "")
+                            live.update_status(
+                                f"  {Colors.WARNING}🎵 [{state['item_index']}/{state['item_total']}]{Colors.ENDC} "
+                                f"{state['last_track_title'] or ''} {Colors.OKCYAN}{tail}{Colors.ENDC}"
+                            )
+
             stdout = "".join(full_output)
-            
+            elapsed = time.time() - start_ts
+
             if process.returncode != 0:
-                if not quiet: spinner.stop(False)
-                
-                # Combined output is in stdout now
+                if not quiet and 'spinner' in locals():
+                    spinner.stop(False)
+
                 out_lower = stdout.lower() if stdout else ""
-                
-                # Check if some files were still produced despite errors (common in playlists)
-                produced_files = any(f.endswith('.flac') or f.endswith('.mp3') for f in os.listdir(folder))
-                
+                produced_files = any(
+                    f.endswith('.flac') or f.endswith('.mp3')
+                    for f in os.listdir(folder)
+                )
+
                 if "does not match filter" in out_lower:
                     if not quiet: print(f"{Colors.WARNING}⏭️  Skipped (Not a music track/filter mismatch){Colors.ENDC}")
-                    # Don't return yet, might have other files in playlist
                 elif "video unavailable" in out_lower or "403" in out_lower:
                     if not quiet: print(f"{Colors.WARNING}⏭️  Skipped (Unavailable/Forbidden - Check Cookies){Colors.ENDC}")
                 else:
-                    if not quiet: 
+                    if not quiet:
                         print(f"{Colors.FAIL}❌ yt-dlp warning/error:{Colors.ENDC}")
                         print(stdout)
                     logging.error(f"yt-dlp error for {link}: {stdout}")
-                
-                # If nothing was downloaded at all and it's a hard error, return
+
                 if not produced_files:
+                    if live: live.finish(ok=False, elapsed_s=elapsed)
                     return False
 
-            if not quiet: spinner.start("Fixing covers...") 
-            elif progress and task_id: progress.update(task_id, description=f"🖼️ Covers: {os.path.basename(folder)}")
-            
-            # Stop spinner temporarily if we expect output from fix_covers
-            # But fix_covers logic prints. 
-            # Ideally we silence fix_covers or let it print above the spinner.
-            # With transient=True, spinner disappears, print happens, spinner reappears (if updated).
-            # But start() uses update() now, so it won't disappear if already running.
-            
+            # ---- Post-process: covers ----
+            if live:
+                live.log(f"  {Colors.OKCYAN}🖼️  Embedding covers…{Colors.ENDC}")
+            elif not quiet:
+                spinner.start("Fixing covers…")
+            elif progress and task_id:
+                progress.update(task_id, description=f"🖼️ Covers: {os.path.basename(folder)}")
+
             self._fix_all_covers(folder)
-            
-            if not quiet: spinner.update("Post-processing (Lyrics & Cleanup)...")
-            
+
+            # ---- Post-process: lyrics/cleanup ----
+            if live:
+                live.log(f"  {Colors.OKCYAN}📝 Fetching lyrics…{Colors.ENDC}")
+            elif not quiet:
+                spinner.update("Post-processing (Lyrics & Cleanup)…")
             self._post_process_downloads(folder, spinner if not quiet else None, quiet=quiet)
-            
-            if not quiet: spinner.stop(True)
+
+            if not quiet and 'spinner' in locals():
+                spinner.stop(True)
+            if live:
+                live.finish(ok=True, elapsed_s=elapsed)
             return True
 
         except Exception as e:
-            if not quiet: spinner.stop(False)
+            if not quiet and 'spinner' in locals():
+                spinner.stop(False)
             print(f"{Colors.FAIL}❌ Error: {e}{Colors.ENDC}")
             logging.error(f"Download Exception {link}: {e}")
+            if live:
+                live.finish(ok=False, elapsed_s=time.time() - start_ts)
             return False
+
+    @staticmethod
+    def _human_size(filename):
+        """Return human size for a finished file (or '' if missing)."""
+        try:
+            if os.path.exists(filename):
+                sz = os.path.getsize(filename)
+                for unit in ("B", "KiB", "MiB", "GiB"):
+                    if sz < 1024:
+                        return f"{sz:.1f} {unit}"
+                    sz /= 1024
+                return f"{sz:.1f} TiB"
+        except Exception:
+            pass
+        return ""
 
     def download_queue_parallel(self, queue_items):
         """
         queue_items: list of (folder_path, url)
+        Honest live feed: no fake bar, no Rich Progress wrapper.
+        Each album prints its own per-track status; a running total is
+        shown between albums.
         """
         if not queue_items: return
 
         parallel = CONFIG.get("parallel_mode", True)
         workers = CONFIG["max_workers"] if parallel else 1
         mode_str = "Parallel" if parallel else "Single-Threaded"
-        
-        print(f"\n🚀 Starting Batch ({len(queue_items)} items) | Mode: {mode_str} | Threads: {workers}")
-        
+
+        sys.stdout.write(
+            f"\n{Colors.HEADER}🚀 Starting Batch ({len(queue_items)} albums) "
+            f"| Mode: {mode_str} | Threads: {workers}{Colors.ENDC}\n"
+        )
+        sys.stdout.flush()
+
         start_time = time.time()
-        
-        if HAS_RICH:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[bold cyan]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                InfoColumn(),
-                transient=False
-            ) as progress:
-                
-                task_overall = progress.add_task("[green]Total Batch Progress", total=len(queue_items))
-                
-                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-                    futures = []
-                    for folder, url in queue_items:
-                        future = executor.submit(self._parallel_worker, folder, url, progress)
-                        futures.append(future)
-                        # Stagger start only in parallel mode
-                        if parallel:
-                            time.sleep(2.0)
+        success_count = 0
+        fail_count = 0
+        idx_lock = threading.Lock()
+        done = [0]  # mutable counter for completed albums
 
-                    success_count = 0
-                    fail_count = 0
-                    failed_items = []
+        def _run_one(album_idx, folder, url):
+            # Print a clear header for this album
+            album_name = os.path.basename(folder)
+            sys.stdout.write(
+                f"\n{Colors.OKCYAN}── Album {album_idx}/{len(queue_items)}: "
+                f"{album_name} ──{Colors.ENDC}\n"
+            )
+            sys.stdout.flush()
 
-                    for future in concurrent.futures.as_completed(futures):
-                        try:
-                            if future.result():
-                                success_count += 1
-                            else:
-                                fail_count += 1
-                        except Exception as e:
-                            logging.error(f"Worker failed: {e}")
+            live = LiveStatus(stream=sys.stdout)
+            ok = False
+            try:
+                ok = self._run_download(
+                    folder, url, quiet=True,
+                    progress=live, task_id=None,
+                )
+            except Exception as e:
+                logging.error(f"Album {album_idx} failed: {e}")
+                ok = False
+            finally:
+                with idx_lock:
+                    done[0] += 1
+                    pct = done[0] * 100 // len(queue_items)
+                sys.stdout.write(
+                    f"  {Colors.OKCYAN}📦 Albums done: "
+                    f"{done[0]}/{len(queue_items)} ({pct}%){Colors.ENDC}\n"
+                )
+                sys.stdout.flush()
+            return ok
+
+        if parallel and workers > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [
+                    executor.submit(_run_one, i + 1, folder, url)
+                    for i, (folder, url) in enumerate(queue_items)
+                ]
+                for fut in concurrent.futures.as_completed(futures):
+                    try:
+                        if fut.result():
+                            success_count += 1
+                        else:
                             fail_count += 1
-                        progress.update(task_overall, advance=1)
-            
-            elapsed = time.time() - start_time
-            
-            # Summary Table
-            if HAS_RICH:
-                table = Table(title="Batch Summary", border_style="green" if fail_count == 0 else "red")
-                table.add_column("Metric", style="bold")
-                table.add_column("Value", justify="right")
-                
-                table.add_row("Total Time", f"{elapsed:.2f}s")
-                table.add_row("Mode", mode_str)
-                table.add_row("[green]Success[/]", str(success_count))
-                table.add_row("[red]Failed[/]", str(fail_count))
-                
-                if fail_count > 0:
-                     table.add_row("[yellow]Note[/]", "Check batchdl.log for details")
-
-                Console().print(table)
-            else:
-                print(f"Batch Done: {success_count} OK, {fail_count} Failed. Time: {elapsed:.2f}s")
+                    except Exception as e:
+                        logging.error(f"Worker exception: {e}")
+                        fail_count += 1
         else:
-            # Fallback
+            # Serial: one album at a time
             for i, (folder, url) in enumerate(queue_items):
-                print(f"--- Item {i+1}/{len(queue_items)} ---")
-                self._run_download(folder, url)
+                if _run_one(i + 1, folder, url):
+                    success_count += 1
+                else:
+                    fail_count += 1
 
-    def _parallel_worker(self, folder, url, progress):
-        task_id = progress.add_task(f"⏳ Waiting: {os.path.basename(folder)}", total=100, speed="", eta="")
+        elapsed = time.time() - start_time
+        sym = "🎉" if fail_count == 0 else "⚠️ "
+        sys.stdout.write(
+            f"\n{Colors.OKGREEN}{sym} Batch done in {elapsed:.1f}s — "
+            f"{success_count} OK, {fail_count} failed{Colors.ENDC}\n"
+        )
+        sys.stdout.flush()
+
+    def _parallel_worker(self, folder, url, live):
+        """Worker for the parallel batch: prints to the shared LiveStatus feed."""
         try:
-            result = self._run_download(folder, url, quiet=True, progress=progress, task_id=task_id)
-            return result
-        finally:
-            progress.remove_task(task_id)
+            return self._run_download(folder, url, quiet=True, progress=live, task_id=None)
+        except Exception as e:
+            logging.error(f"Worker failed: {e}")
+            return False
+
+    def _fetch_playlist_title(self, url):
+        """Use yt-dlp to quickly fetch the playlist/video title without downloading.
+        Returns the title string, or None on failure."""
+        try:
+            result = subprocess.run(
+                [
+                    YT_DLP_CMD,
+                    "--flat-playlist",
+                    "--dump-single-json",
+                    "--no-warnings",
+                    "--playlist-items", "0",  # metadata only, no items
+                    url,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                data = json.loads(result.stdout.strip())
+                return data.get("title") or data.get("playlist_title") or None
+        except Exception:
+            pass
+        return None
 
     def download_single_url(self, folder_name, url):
+        """Single URL download. Uses a LiveStatus feed for honest progress."""
         full_path = os.path.join(DOWNLOAD_ROOT, folder_name)
-        
-        if HAS_RICH:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[bold cyan]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                InfoColumn(),
-                transient=False
-            ) as progress:
-                task_id = progress.add_task(f"⬇️ {folder_name}", total=100, speed="", eta="")
-                return self._run_download(full_path, url, quiet=True, progress=progress, task_id=task_id)
-        else:
-            return self._run_download(full_path, url)
+        live = LiveStatus(header=f"⬇️ {folder_name}")
+        return self._run_download(full_path, url, quiet=True, progress=live, task_id=None)
 
     def download_playlist_url(self, playlist_name, url):
+        """Playlist download. Uses a LiveStatus feed for honest progress."""
         full_path = os.path.join(DOWNLOAD_ROOT, "Playlists", playlist_name)
-        
-        if HAS_RICH:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[bold cyan]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                InfoColumn(),
-                transient=False
-            ) as progress:
-                task_id = progress.add_task(f"⬇️ {playlist_name}", total=100, speed="", eta="")
-                return self._run_download(full_path, url, quiet=True, progress=progress, task_id=task_id)
-        else:
-            return self._run_download(full_path, url)
+        live = LiveStatus(header=f"⬇️ Playlists/{playlist_name}")
+        return self._run_download(full_path, url, quiet=True, progress=live, task_id=None)
 
     # ---------- library display ----------
     # ---------- library display ----------
@@ -1324,16 +1576,42 @@ def main():
                     downloader.library = LibraryManager(DOWNLOAD_ROOT)
 
             elif choice == "2":
+                # Ask for URL first so we can auto-fetch the title
                 if HAS_RICH:
-                    playlist_name = Console().input("[bold yellow]📀 Playlist name: [/]").strip()
                     link = Console().input("[bold yellow]🔗 YouTube/YT Music playlist URL: [/]").strip()
                 else:
-                    playlist_name = input("📀 Playlist name: ").strip()
                     link = input("🔗 YouTube/YT Music playlist URL: ").strip()
-                    
-                if playlist_name and link:
-                    downloader.download_playlist_url(playlist_name, link)
-                    downloader.library = LibraryManager(DOWNLOAD_ROOT)
+
+                if link:
+                    # Auto-fetch playlist title as default name
+                    fetched_title = None
+                    spinner = Spinner()
+                    spinner.start("🔍 Fetching playlist title…")
+                    try:
+                        fetched_title = downloader._fetch_playlist_title(link)
+                    finally:
+                        spinner.stop(fetched_title is not None)
+
+                    if fetched_title:
+                        print(f"{Colors.OKCYAN}📀 Detected title: {Colors.OKGREEN}{fetched_title}{Colors.ENDC}")
+                        if HAS_RICH:
+                            custom = Console().input(
+                                f"[bold yellow]📀 Playlist name [Enter to use '{fetched_title}']: [/]"
+                            ).strip()
+                        else:
+                            custom = input(f"📀 Playlist name [Enter to use '{fetched_title}']: ").strip()
+                        playlist_name = custom if custom else fetched_title
+                    else:
+                        # Fallback: no title found, ask manually
+                        print(f"{Colors.WARNING}⚠️  Could not auto-fetch title. Please enter one manually.{Colors.ENDC}")
+                        if HAS_RICH:
+                            playlist_name = Console().input("[bold yellow]📀 Playlist name: [/]").strip()
+                        else:
+                            playlist_name = input("📀 Playlist name: ").strip()
+
+                    if playlist_name:
+                        downloader.download_playlist_url(playlist_name, link)
+                        downloader.library = LibraryManager(DOWNLOAD_ROOT)
             
             elif choice == "3":
                 if HAS_RICH:
