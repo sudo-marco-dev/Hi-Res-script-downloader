@@ -780,7 +780,7 @@ class MusicDownloader:
         self._run(cmd)
 
     def _embed_cover_into_flac(self, flac_path, cover_jpg_500):
-        # Re-mux audio copy + attach picture
+        # Re-mux audio copy + attach picture (FLAC native METADATA_BLOCK_PICTURE)
         tmp = flac_path + ".tmp.flac"
         cmd = [
             FFMPEG_CMD, "-y",
@@ -795,6 +795,26 @@ class MusicDownloader:
         ]
         self._run(cmd)
         safe_file_op(os.replace, tmp, flac_path)
+
+    def _embed_cover_into_mp3(self, mp3_path, cover_jpg_500):
+        # Attach cover as ID3v2 APIC frame; keep MP3 audio stream intact
+        tmp = mp3_path + ".tmp.mp3"
+        cmd = [
+            FFMPEG_CMD, "-y",
+            "-i", mp3_path,
+            "-i", cover_jpg_500,
+            "-map", "0:a",
+            "-map", "1:v",
+            "-c:a", "copy",
+            "-c:v", "copy",
+            "-id3v2_version", "3",
+            "-metadata:s:v", "title=Album cover",
+            "-metadata:s:v", "comment=Cover (front)",
+            "-disposition:v:0", "attached_pic",
+            tmp
+        ]
+        self._run(cmd)
+        safe_file_op(os.replace, tmp, mp3_path)
 
     def _find_best_thumbnail_for_trackbase(self, base_no_ext):
         candidates = [
@@ -847,7 +867,12 @@ class MusicDownloader:
         cover500 = base + ".cover500.jpg"
         try:
             self._make_square_500(thumb, cover500)
-            self._embed_cover_into_flac(filepath, cover500)
+            # Dispatch to the correct embedder based on file extension
+            ext = os.path.splitext(filepath)[1].lower()
+            if ext == ".mp3":
+                self._embed_cover_into_mp3(filepath, cover500)
+            else:
+                self._embed_cover_into_flac(filepath, cover500)
             print(f"{Colors.OKGREEN}🖼️  Embedded 500x500 cover → {os.path.basename(filepath)}{Colors.ENDC}")
             
         except Exception as e:
