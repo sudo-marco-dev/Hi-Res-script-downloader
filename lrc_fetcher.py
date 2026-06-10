@@ -163,44 +163,52 @@ class LRCFetcher:
         return False
 
     def scan_folder(self, folder_path):
+        """Scan folder for audio files and fetch lyrics.
+        Returns (found, missing, skipped) counts.
+        """
         folder = Path(folder_path)
+        found = missing = skipped = 0
+
         if not folder.exists():
             print(f"{Colors.FAIL}❌ Folder not found!{Colors.ENDC}")
-            return
+            return found, missing, skipped
 
         print(f"\n{Colors.HEADER}📂 Scanning: {folder}{Colors.ENDC}")
         extensions = ['*.mp3', '*.flac', '*.m4a', '*.wav', '*.ogg', '*.opus']
         files = []
         for ext in extensions:
-            files.extend(list(folder.glob(ext))) # Not recursive by default for album safety
-            
+            files.extend(list(folder.glob(ext)))
+
         if not files:
             print(f"{Colors.WARNING}No audio files found.{Colors.ENDC}")
-            return
+            return found, missing, skipped
 
         print(f"Found {len(files)} audio files.")
-        
+
         for filepath in files:
-            # Check if lrc exists
             lrc_path = filepath.with_suffix(".lrc")
             if lrc_path.exists():
                 print(f"{Colors.OKBLUE}⏭️  Exists: {filepath.name}{Colors.ENDC}")
+                skipped += 1
                 continue
-                
+
             print(f"Processing: {filepath.name}")
             meta = self.get_metadata(str(filepath))
-            
+
             artist = meta["artist"]
             title = meta["title"]
             album = meta["album"]
-            
+
             print(f"  🔍 Query: {artist} - {title} (Alb: {album})")
-            
-            # If we don't have artist/title, ask user? Or skip?
-            # For automation, we skip if absolutely unknown, but get_metadata tries hard.
-            
-            self.fetch_lrc(artist, title, album, lrc_path)
-            time.sleep(0.5) # Rate limit politeness
+
+            ok = self.fetch_lrc(artist, title, album, lrc_path)
+            if ok:
+                found += 1
+            else:
+                missing += 1
+            time.sleep(0.5)  # Rate limit politeness
+
+        return found, missing, skipped
 
 def main():
     print(f"{Colors.HEADER}🎤 LRCLIB FETCHER TOOL{Colors.ENDC}")

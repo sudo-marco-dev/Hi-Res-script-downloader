@@ -141,6 +141,10 @@ CONF_MANAGER = ConfigManager()
 CONFIG = CONF_MANAGER.config
 DOWNLOAD_ROOT = CONFIG["music_folder"]
 
+# ========== GLOBAL CONSTANTS ==========
+VERSION = "17.2"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 def find_yt_dlp():
     # 1. Check in the same directory as the python executable (Scripts/ or bin/)
     # This helps when running from a venv without activation
@@ -164,15 +168,12 @@ def find_yt_dlp():
     
     if os.path.exists(local_exe):
         return local_exe
-        
-    # 3. Fallback to PATH
-    import shutil
-    if shutil.which("yt-dlp"):
-         return "yt-dlp"
-         
-    return "yt-dlp" # Hope for the best
 
-    return "yt-dlp" # Hope for the best
+    # 3. Fallback to PATH
+    if shutil.which("yt-dlp"):
+        return "yt-dlp"
+
+    return "yt-dlp"  # Hope for the best
 
 YT_DLP_CMD = find_yt_dlp()
 FFMPEG_CMD = "ffmpeg"
@@ -302,7 +303,6 @@ class LiveStatus:
             else:
                 self._stream.write(f"{msg}\n")
             self._stream.flush()
-        print(f"{msg}", flush=True)  # also to log
 
     def start_track(self, idx, title, total=None):
         """Show that a new track has started downloading."""
@@ -361,7 +361,7 @@ class SnowskyUI:
     def print_header(self):
         if HAS_RICH:
             self.console.clear()
-            title = Text(" SNOWSKY RETRO MINI MANAGER v17.1 ", style="bold white on blue", justify="center")
+            title = Text(f" SNOWSKY RETRO MINI MANAGER v{VERSION} ", style="bold white on blue", justify="center")
             
             # Info Panel
             info = f"[dim]Folder:[/dim] [yellow]{DOWNLOAD_ROOT}[/yellow]\n"
@@ -369,7 +369,7 @@ class SnowskyUI:
             
             self.console.print(Panel(info, title=title, border_style="blue"))
         else:
-            print(f"{Colors.HEADER}🎵 SNOWSKY RETRO MINI MUSIC MANAGER v17.1{Colors.ENDC}")
+            print(f"{Colors.HEADER}🎵 SNOWSKY RETRO MINI MUSIC MANAGER v{VERSION}{Colors.ENDC}")
             print(f"{Colors.OKCYAN}📁 {DOWNLOAD_ROOT}{Colors.ENDC}")
             print("=" * 70)
 
@@ -398,6 +398,8 @@ class SnowskyUI:
             table.add_row("", "")
             table.add_row("v", "📚  View Library (Tree)")
             table.add_row("c", "🧹  Clean Junk Files")
+            table.add_row("ls", "🎤  Scan Missing Lyrics")
+            table.add_row("u", "🔄  Update yt-dlp")
             table.add_row("", "")
             table.add_row("m", f"🔄  Toggle Format ({fmt_style})")
             table.add_row("f", f"🎵  Music Only Filter ({filter_style})")
@@ -413,11 +415,23 @@ class SnowskyUI:
             )
             self.console.print(panel)
         else:
-            # Fallback Menu
+            # Fallback plain-text menu (mirrors the Rich version)
+            mp3_str = "MP3" if mp3 else "FLAC"
+            filter_str = "ON" if music_filter else "OFF"
+            lyrics_str = "ON" if lyrics else "OFF"
+            parallel_str = "PARALLEL" if parallel else "SINGLE"
             print("\n1) URL -> Artist/Album")
             print("2) Playlist -> Playlists/")
             print("3) Snowsky Copy")
+            print("4) Batch Artist (Multiple URLs)")
             print("v) View Library")
+            print("c) Clean Junk Files")
+            print("ls) Scan Missing Lyrics")
+            print("u) Update yt-dlp")
+            print(f"m) Toggle Format [{mp3_str}]")
+            print(f"f) Music Only Filter [{filter_str}]")
+            print(f"l) Lyrics Download [{lyrics_str}]")
+            print(f"p) Download Mode [{parallel_str}]")
             print("0) Quit")
 
 
@@ -467,6 +481,66 @@ class Colors:
     FAIL = '\033[91m'
     ENDC = '\033[0m'
     BOLD = '\033[1m'
+
+
+class DownloadStats:
+    """Tracks per-download metrics for the end-of-run summary."""
+    def __init__(self):
+        self.tracks_downloaded: int = 0
+        self.tracks_skipped: int = 0
+        self.covers_ok: int = 0
+        self.covers_failed: list = []
+        self.covers_no_thumb: int = 0
+        self.lyrics_found: int = 0
+        self.lyrics_missing: int = 0
+        self.lyrics_skipped: int = 0   # already had .lrc
+        self.errors: list = []
+
+    def print_summary(self, elapsed_s=None):
+        """Print a formatted summary block."""
+        bar = Colors.HEADER + ("─" * 48) + Colors.ENDC
+        has_data = any([
+            self.tracks_downloaded, self.tracks_skipped,
+            self.covers_ok, self.covers_failed, self.covers_no_thumb,
+            self.lyrics_found, self.lyrics_missing, self.errors,
+        ])
+        if not has_data:
+            return
+        print(f"\n{bar}")
+        print(f"{Colors.BOLD}{Colors.HEADER}  📊 Download Summary{Colors.ENDC}")
+        print(bar)
+        if self.tracks_downloaded:
+            print(f"  {Colors.OKGREEN}🎵 Tracks saved:     {self.tracks_downloaded}{Colors.ENDC}")
+        if self.tracks_skipped:
+            print(f"  {Colors.WARNING}⏭️  Tracks skipped:   {self.tracks_skipped}{Colors.ENDC}")
+        # Covers
+        c_parts = []
+        if self.covers_ok:
+            c_parts.append(f"{Colors.OKGREEN}{self.covers_ok} ✅{Colors.ENDC}")
+        if self.covers_failed:
+            c_parts.append(f"{Colors.FAIL}{len(self.covers_failed)} embed fail{Colors.ENDC}")
+        if self.covers_no_thumb:
+            c_parts.append(f"{Colors.WARNING}{self.covers_no_thumb} no thumb{Colors.ENDC}")
+        if c_parts:
+            print(f"  🖼️  Covers:           {'  '.join(c_parts)}")
+        # Lyrics
+        l_parts = []
+        if self.lyrics_found:
+            l_parts.append(f"{Colors.OKGREEN}{self.lyrics_found} ✅{Colors.ENDC}")
+        if self.lyrics_missing:
+            l_parts.append(f"{Colors.WARNING}{self.lyrics_missing} not found{Colors.ENDC}")
+        if self.lyrics_skipped:
+            l_parts.append(f"{Colors.OKCYAN}{self.lyrics_skipped} existed{Colors.ENDC}")
+        if l_parts:
+            print(f"  🎤 Lyrics:           {'  '.join(l_parts)}")
+        if self.errors:
+            print(f"  {Colors.FAIL}❌ Errors:           {len(self.errors)}{Colors.ENDC}")
+            for msg in self.errors[:3]:
+                print(f"     • {str(msg)[:65]}")
+        if elapsed_s:
+            print(f"  ⏱️  Elapsed:          {elapsed_s:.1f}s")
+        print(bar + "\n")
+
 
 def safe_file_op(func, *args, retries=3, delay=0.5, **kwargs):
     """Gracefully handle WinError 32 (file in use) with retries."""
@@ -650,37 +724,47 @@ class LRCFetcher:
         return False
 
     def scan_folder(self, folder_path):
-        """Scan folder for audio files and fetch lyrics."""
+        """Scan folder for audio files and fetch lyrics.
+        Returns (found, missing, skipped) counts.
+        """
         folder = Path(folder_path)
+        found = missing = skipped = 0
         if not folder.exists():
-            return
+            return found, missing, skipped
 
         extensions = ['*.mp3', '*.flac', '*.m4a', '*.wav', '*.ogg']
         files = []
         for ext in extensions:
             files.extend(list(folder.glob(ext)))
-            
+
         if not files:
-            return
+            return found, missing, skipped
 
         for filepath in files:
-            # Check if lrc exists
             lrc_path = filepath.with_suffix(".lrc")
             if lrc_path.exists():
+                skipped += 1
                 continue
-                
+
             meta = self.get_metadata(str(filepath))
             artist = meta["artist"]
             title = meta["title"]
             album = meta["album"]
-            
+
             if not artist or not title:
                 print(f"    {Colors.WARNING}⏭️  Skip: {filepath.name} (No metadata){Colors.ENDC}")
+                missing += 1
                 continue
-                
+
             print(f"    🔍 {artist} - {title}")
-            self.fetch_lrc(artist, title, album, str(lrc_path))
+            ok = self.fetch_lrc(artist, title, album, str(lrc_path))
+            if ok:
+                found += 1
+            else:
+                missing += 1
             time.sleep(0.3)  # Rate limiting
+
+        return found, missing, skipped
 
 class LibraryManager:
     """Manages library scanning (Recursive + Caching)."""
@@ -723,12 +807,9 @@ class LibraryManager:
                 if parent_name == "Playlists":
                     artist_name = "Playlist"
                 elif path_obj.parent == self.root:
-                     # This is Artist folder directly containing songs (loose files)
-                     artist_name = album_name # Use current folder as artist? 
-                     # Wait, if loose files in Artist folder: Artist/song.mp3
-                     # Then roots is Artist.
-                     artist_name = album_name
-                     album_name = "Singles"
+                    # Loose files directly in an artist folder → treat as Singles
+                    artist_name = album_name
+                    album_name = "Singles"
                 else:
                     artist_name = parent_name
 
@@ -764,6 +845,9 @@ class MusicDownloader:
         self.mp3_mode = CONFIG.get("mp3_mode", False)
         self.music_only = CONFIG.get("music_only", False)
         self.lyrics_mode = CONFIG.get("lyrics_mode", True)
+        # Reuse a single LRCFetcher (and its requests.Session) for the lifetime
+        # of the downloader so we benefit from connection pooling.
+        self.lrc_fetcher = LRCFetcher() if HAS_REQUESTS else None
 
     def _check_ffmpeg(self):
         """Check if ffmpeg is available in PATH or local directory. Auto-find if possible."""
@@ -809,8 +893,7 @@ class MusicDownloader:
     # ---------- yt-dlp ----------
     def _find_cookies_file(self):
         """Auto-detect cookies.txt next to the script."""
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        cookies_path = os.path.join(script_dir, "cookies.txt")
+        cookies_path = os.path.join(SCRIPT_DIR, "cookies.txt")
         if os.path.exists(cookies_path):
             return cookies_path
         return None
@@ -846,11 +929,12 @@ class MusicDownloader:
         else:
             cmd.extend(["--audio-format", "flac", "--audio-quality", "0"])
 
-        # Thumbnails
+        # Thumbnails + safe re-run
         cmd.extend([
             "--write-thumbnail",
             "--convert-thumbnails", "jpg",
             "--ppa", "ThumbnailsConvertor:-q:v 2",
+            "--no-overwrites",   # Skip tracks that already exist (safe re-runs)
             "--output", outtmpl,
             url
         ])
@@ -927,44 +1011,40 @@ class MusicDownloader:
         # safe to skip for now to avoid bad matches
         return None
 
-    def _fix_all_covers(self, folder):
+    def _fix_all_covers(self, folder, stats=None):
         """Fix covers for both FLAC and MP3 in the folder"""
-        # Process FLAC
-        flacs = sorted(glob.glob(os.path.join(folder, "*.flac")))
-        if flacs:
-            for flac in flacs:
-                self._process_single_file_cover(flac)
-        
-        # Process MP3
-        mp3s = sorted(glob.glob(os.path.join(folder, "*.mp3")))
-        if mp3s:
-            for mp3 in mp3s:
-                self._process_single_file_cover(mp3)
+        for pattern in ("*.flac", "*.mp3"):
+            for filepath in sorted(glob.glob(os.path.join(folder, pattern))):
+                self._process_single_file_cover(filepath, stats=stats)
 
-    def _process_single_file_cover(self, filepath):
+    def _process_single_file_cover(self, filepath, stats=None):
         base = os.path.splitext(filepath)[0]
         folder = os.path.dirname(filepath)
-        
+
         thumb = self._find_best_thumbnail_for_trackbase(base)
         if not thumb:
             thumb = self._find_fallback_cover(folder)
-            
+
         if not thumb:
+            if stats:
+                stats.covers_no_thumb += 1
             return
 
         cover500 = base + ".cover500.jpg"
         try:
             self._make_square_500(thumb, cover500)
-            # Dispatch to the correct embedder based on file extension
             ext = os.path.splitext(filepath)[1].lower()
             if ext == ".mp3":
                 self._embed_cover_into_mp3(filepath, cover500)
             else:
                 self._embed_cover_into_flac(filepath, cover500)
             print(f"{Colors.OKGREEN}🖼️  Embedded 500x500 cover → {os.path.basename(filepath)}{Colors.ENDC}")
-            
+            if stats:
+                stats.covers_ok += 1
         except Exception as e:
             print(f"{Colors.FAIL}❌ Cover embed failed for {os.path.basename(filepath)}: {e}{Colors.ENDC}")
+            if stats:
+                stats.covers_failed.append(os.path.basename(filepath))
         finally:
             if os.path.exists(cover500):
                 safe_file_op(os.remove, cover500)
@@ -973,30 +1053,29 @@ class MusicDownloader:
                 if os.path.exists(p):
                     try:
                         safe_file_op(os.remove, p)
-                    except:
+                    except Exception:
                         pass
 
     # ---------- lyrics & cleanup ----------
-    def _post_process_downloads(self, folder, spinner=None, quiet=False):
+    def _post_process_downloads(self, folder, spinner=None, quiet=False, stats=None):
         """Clean .info.json and run robust lyrics fetcher."""
-        # 1. Cleanup Junk (Priority)
-        jsons = glob.glob(os.path.join(folder, "*.info.json"))
-        for json_path in jsons:
+        # 1. Cleanup Junk
+        for json_path in glob.glob(os.path.join(folder, "*.info.json")):
             try:
                 safe_file_op(os.remove, json_path)
             except Exception:
                 pass
 
         # 2. Fetch Lyrics (if enabled)
-        if self.lyrics_mode and HAS_REQUESTS:
+        if self.lyrics_mode and self.lrc_fetcher:
             try:
-                # If we are in quiet mode (parallel), we shouldn't print extensive logs
-                # But fetch_lrc prints too. 
-                # Ideally, lrc fetcher should be quiet.
-                fetcher = LRCFetcher()
-                if spinner: spinner.start("Finalizing (Lyrics)...")
-                fetcher.scan_folder(folder) # This prints to stdout... need to silence it or accept it.
-                # For now, let it run.
+                if spinner:
+                    spinner.start("Finalizing (Lyrics)…")
+                found, missing, skipped = self.lrc_fetcher.scan_folder(folder)
+                if stats:
+                    stats.lyrics_found += found
+                    stats.lyrics_missing += missing
+                    stats.lyrics_skipped += skipped
             except Exception as e:
                 logging.error(f"Lyrics Error: {e}")
 
@@ -1121,6 +1200,7 @@ class MusicDownloader:
         os.makedirs(folder, exist_ok=True)
         link = clean_url(link)
         fmt = "MP3" if self.mp3_mode else "FLAC"
+        stats = DownloadStats()
 
         # The caller can pass in a pre-created LiveStatus (used for the
         # parallel batch flow), or we create one here for single downloads.
@@ -1212,7 +1292,7 @@ class MusicDownloader:
                     elif event_type == "EXTRACT":
                         dest = os.path.basename(payload.get("destination", ""))
                         state["last_track_title"] = dest
-                        # Use whatever item_index we have; fall back to 1 for single URLs
+                        stats.tracks_downloaded += 1
                         idx = state["item_index"] if state["item_index"] else 1
                         total = state["item_total"] if state["item_total"] else 1
                         try:
@@ -1254,17 +1334,21 @@ class MusicDownloader:
                 )
 
                 if "does not match filter" in out_lower:
+                    stats.tracks_skipped += 1
                     if not quiet: print(f"{Colors.WARNING}⏭️  Skipped (Not a music track/filter mismatch){Colors.ENDC}")
                 elif "video unavailable" in out_lower or "403" in out_lower:
+                    stats.tracks_skipped += 1
                     if not quiet: print(f"{Colors.WARNING}⏭️  Skipped (Unavailable/Forbidden - Check Cookies){Colors.ENDC}")
                 else:
                     if not quiet:
                         print(f"{Colors.FAIL}❌ yt-dlp warning/error:{Colors.ENDC}")
                         print(stdout)
                     logging.error(f"yt-dlp error for {link}: {stdout}")
+                    stats.errors.append(f"yt-dlp error: {stdout[:120]}")
 
                 if not produced_files:
                     if live: live.finish(ok=False, elapsed_s=elapsed)
+                    stats.print_summary(elapsed_s=elapsed)
                     return False
 
             # ---- Post-process: covers ----
@@ -1275,19 +1359,20 @@ class MusicDownloader:
             elif progress and task_id:
                 progress.update(task_id, description=f"🖼️ Covers: {os.path.basename(folder)}")
 
-            self._fix_all_covers(folder)
+            self._fix_all_covers(folder, stats=stats)
 
             # ---- Post-process: lyrics/cleanup ----
             if live:
                 live.log(f"  {Colors.OKCYAN}📝 Fetching lyrics…{Colors.ENDC}")
             elif not quiet:
                 spinner.update("Post-processing (Lyrics & Cleanup)…")
-            self._post_process_downloads(folder, spinner if not quiet else None, quiet=quiet)
+            self._post_process_downloads(folder, spinner if not quiet else None, quiet=quiet, stats=stats)
 
             if not quiet and 'spinner' in locals():
                 spinner.stop(True)
             if live:
                 live.finish(ok=True, elapsed_s=elapsed)
+            stats.print_summary(elapsed_s=elapsed)
             return True
 
         except Exception as e:
@@ -1295,8 +1380,10 @@ class MusicDownloader:
                 spinner.stop(False)
             print(f"{Colors.FAIL}❌ Error: {e}{Colors.ENDC}")
             logging.error(f"Download Exception {link}: {e}")
+            stats.errors.append(str(e))
             if live:
                 live.finish(ok=False, elapsed_s=time.time() - start_ts)
+            stats.print_summary(elapsed_s=time.time() - start_ts)
             return False
 
     @staticmethod
@@ -1410,15 +1497,17 @@ class MusicDownloader:
 
     def _fetch_playlist_title(self, url):
         """Use yt-dlp to quickly fetch the playlist/video title without downloading.
-        Returns the title string, or None on failure."""
+        Returns the sanitized title string, or None on failure.
+        Uses --skip-download for broad yt-dlp version compatibility.
+        """
         try:
             result = subprocess.run(
                 [
                     YT_DLP_CMD,
+                    "--skip-download",
                     "--flat-playlist",
                     "--dump-single-json",
                     "--no-warnings",
-                    "--playlist-items", "0",  # metadata only, no items
                     url,
                 ],
                 capture_output=True,
@@ -1429,10 +1518,18 @@ class MusicDownloader:
             )
             if result.returncode == 0 and result.stdout.strip():
                 data = json.loads(result.stdout.strip())
-                return data.get("title") or data.get("playlist_title") or None
+                raw = data.get("title") or data.get("playlist_title") or None
+                if raw:
+                    return self._sanitize_folder_name(raw)
         except Exception:
             pass
         return None
+
+    @staticmethod
+    def _sanitize_folder_name(name: str) -> str:
+        """Strip characters that are illegal in Windows/Linux folder names."""
+        sanitized = re.sub(r'[\\/:*?"<>|]', '-', name)
+        return sanitized.strip(' .-')  # also strip leading/trailing dots and spaces
 
     def download_single_url(self, folder_name, url):
         """Single URL download. Uses a LiveStatus feed for honest progress."""
@@ -1446,7 +1543,66 @@ class MusicDownloader:
         live = LiveStatus(header=f"⬇️ Playlists/{playlist_name}")
         return self._run_download(full_path, url, quiet=True, progress=live, task_id=None)
 
-    # ---------- library display ----------
+    def scan_lyrics_folder(self, target_path):
+        """Recursively scan a folder for missing .lrc files and fetch them.
+        Prints a summary when done.
+        """
+        if not self.lrc_fetcher:
+            print(f"{Colors.FAIL}❌ requests library not available. Cannot fetch lyrics.{Colors.ENDC}")
+            return
+
+        target = Path(target_path)
+        if not target.exists():
+            print(f"{Colors.FAIL}❌ Folder not found: {target_path}{Colors.ENDC}")
+            return
+
+        audio_exts = {'.mp3', '.flac', '.m4a', '.wav', '.ogg'}
+
+        # Collect all subfolders (and root) that contain audio files
+        folders_to_scan = []
+        for root, dirs, files in os.walk(target):
+            if any(Path(f).suffix.lower() in audio_exts for f in files):
+                folders_to_scan.append(root)
+
+        if not folders_to_scan:
+            print(f"{Colors.WARNING}⚠️  No audio files found under: {target_path}{Colors.ENDC}")
+            return
+
+        total_found = total_missing = total_skipped = 0
+        bar = Colors.HEADER + ("─" * 50) + Colors.ENDC
+
+        print(f"\n{bar}")
+        print(f"{Colors.BOLD}{Colors.HEADER}  🎤 Lyrics-Only Scan{Colors.ENDC}")
+        print(f"{Colors.OKCYAN}  📂 Target: {target_path}{Colors.ENDC}")
+        print(f"{Colors.OKCYAN}  📁 {len(folders_to_scan)} folder(s) to scan{Colors.ENDC}")
+        print(bar)
+
+        for folder in folders_to_scan:
+            rel = os.path.relpath(folder, target_path)
+            label = "." if rel == "." else rel
+            print(f"\n{Colors.OKCYAN}📂 {label}{Colors.ENDC}")
+            try:
+                found, missing, skipped = self.lrc_fetcher.scan_folder(folder)
+                total_found += found
+                total_missing += missing
+                total_skipped += skipped
+            except Exception as e:
+                logging.error(f"Lyrics scan error for {folder}: {e}")
+                print(f"{Colors.FAIL}❌ Error scanning {label}: {e}{Colors.ENDC}")
+
+        # Final summary
+        print(f"\n{bar}")
+        print(f"{Colors.BOLD}{Colors.HEADER}  📊 Lyrics Scan Complete{Colors.ENDC}")
+        print(bar)
+        print(f"  {Colors.OKGREEN}✅ Found:         {total_found}{Colors.ENDC}")
+        print(f"  {Colors.WARNING}❌ Not found:     {total_missing}{Colors.ENDC}")
+        print(f"  {Colors.OKCYAN}⏭️  Already had:   {total_skipped}{Colors.ENDC}")
+        total_audio = total_found + total_missing + total_skipped
+        if total_audio:
+            pct = int(total_found * 100 / total_audio)
+            print(f"  📌 Coverage:       {pct}% ({total_found}/{total_audio})")    
+        print(bar)
+
     # ---------- library display ----------
     def print_compact_library(self):
         items = self.library.get_numbered_items()
@@ -1696,6 +1852,52 @@ def main():
             elif choice == "v":
                 ui.show_library_tree(DOWNLOAD_ROOT)
 
+            elif choice == "ls":
+                print(f"\n{Colors.OKCYAN}🎤 Lyrics-Only Scan Mode{Colors.ENDC}")
+                print(f"{Colors.OKCYAN}  1) Scan a Playlist folder{Colors.ENDC}")
+                print(f"{Colors.OKCYAN}  2) Scan an Artist/Album folder{Colors.ENDC}")
+                print(f"{Colors.OKCYAN}  3) Enter a custom path{Colors.ENDC}")
+                ls_choice = input("Choice [1/2/3]: ").strip()
+
+                if ls_choice == "1":
+                    playlists_root = os.path.join(DOWNLOAD_ROOT, "Playlists")
+                    if not os.path.isdir(playlists_root):
+                        print(f"{Colors.FAIL}❌ Playlists folder not found.{Colors.ENDC}")
+                    else:
+                        subs = [d for d in os.listdir(playlists_root)
+                                if os.path.isdir(os.path.join(playlists_root, d))]
+                        if not subs:
+                            print(f"{Colors.WARNING}⚠️  No playlist subfolders found.{Colors.ENDC}")
+                        else:
+                            for i, s in enumerate(subs, 1):
+                                print(f"  {Colors.OKCYAN}{i}) {s}{Colors.ENDC}")
+                            pick = input("Pick number (or Enter to scan all): ").strip()
+                            if pick.isdigit() and 1 <= int(pick) <= len(subs):
+                                scan_target = os.path.join(playlists_root, subs[int(pick)-1])
+                            else:
+                                scan_target = playlists_root
+                            downloader.scan_lyrics_folder(scan_target)
+
+                elif ls_choice == "2":
+                    artist = input("🎤 Artist name (or Enter to scan all): ").strip()
+                    if artist:
+                        scan_target = os.path.join(DOWNLOAD_ROOT, artist)
+                    else:
+                        scan_target = DOWNLOAD_ROOT
+                    downloader.scan_lyrics_folder(scan_target)
+
+                elif ls_choice == "3":
+                    custom = input("📁 Path: ").strip().strip('"')
+                    if custom:
+                        downloader.scan_lyrics_folder(custom)
+
+            elif choice == "u":
+                print(f"{Colors.OKCYAN}🔄 Updating yt-dlp…{Colors.ENDC}")
+                try:
+                    subprocess.run([YT_DLP_CMD, "-U"], check=False)
+                except Exception as e:
+                    print(f"{Colors.FAIL}❌ Update failed: {e}{Colors.ENDC}")
+
             elif choice == "9" or choice == "c":
                  downloader.cleanup_junk()
 
@@ -1723,7 +1925,8 @@ def main():
                 print("👋 Bye!")
                 break
 
-            if choice not in ["v", "0"]:
+            # Toggle-only actions refresh the menu immediately; everything else pauses
+            if choice not in ["v", "0", "m", "f", "l", "p"]:
                 input("\nPress Enter...")
 
         except KeyboardInterrupt:
