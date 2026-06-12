@@ -79,7 +79,8 @@ DEFAULT_CONFIG = {
     "cookies_browser": None,  # e.g. "firefox", "chrome"
     "max_workers": 2,
     "parallel_mode": True,
-    "filename_template": "%(playlist_index|00|)s %(title)s.%(ext)s"
+    "filename_template": "%(playlist_index|00|)s %(title)s.%(ext)s",
+    "realtime_processing": True
 }
 
 class ConfigManager:
@@ -399,6 +400,7 @@ class SnowskyUI:
             table.add_row("v", "📚  View Library (Tree)")
             table.add_row("c", "🧹  Clean Junk Files")
             table.add_row("ls", "🎤  Scan Missing Lyrics")
+            table.add_row("s", "⚙️   Settings / Config")
             table.add_row("u", "🔄  Update yt-dlp")
             table.add_row("", "")
             table.add_row("m", f"🔄  Toggle Format ({fmt_style})")
@@ -427,6 +429,7 @@ class SnowskyUI:
             print("v) View Library")
             print("c) Clean Junk Files")
             print("ls) Scan Missing Lyrics")
+            print("s) Settings / Config")
             print("u) Update yt-dlp")
             print(f"m) Toggle Format [{mp3_str}]")
             print(f"f) Music Only Filter [{filter_str}]")
@@ -727,6 +730,8 @@ class LRCFetcher:
         """Scan folder for audio files and fetch lyrics.
         Returns (found, missing, skipped) counts.
         """
+        import concurrent.futures
+        
         folder = Path(folder_path)
         found = missing = skipped = 0
         if not folder.exists():
@@ -740,12 +745,18 @@ class LRCFetcher:
         if not files:
             return found, missing, skipped
 
+        to_fetch = []
         for filepath in files:
             lrc_path = filepath.with_suffix(".lrc")
             if lrc_path.exists():
                 skipped += 1
-                continue
+            else:
+                to_fetch.append(filepath)
 
+        if not to_fetch:
+            return found, missing, skipped
+
+        def _fetch_worker(filepath):
             meta = self.get_metadata(str(filepath))
             artist = meta["artist"]
             title = meta["title"]
@@ -753,16 +764,19 @@ class LRCFetcher:
 
             if not artist or not title:
                 print(f"    {Colors.WARNING}⏭️  Skip: {filepath.name} (No metadata){Colors.ENDC}")
-                missing += 1
-                continue
+                return False
 
             print(f"    🔍 {artist} - {title}")
-            ok = self.fetch_lrc(artist, title, album, str(lrc_path))
-            if ok:
-                found += 1
-            else:
-                missing += 1
-            time.sleep(0.3)  # Rate limiting
+            lrc_path = filepath.with_suffix(".lrc")
+            return self.fetch_lrc(artist, title, album, str(lrc_path))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            results = executor.map(_fetch_worker, to_fetch)
+            for ok in results:
+                if ok:
+                    found += 1
+                else:
+                    missing += 1
 
         return found, missing, skipped
 
@@ -826,6 +840,16 @@ class LibraryManager:
         # Sort by Artist then Album
         self.items.sort(key=lambda x: (x["artist"].lower(), x["album"].lower()))
 
+    def refresh_library_if_changed(self):
+        """Only refresh if the mtime of the DOWNLOAD_ROOT changed."""
+        try:
+            mtime = os.path.getmtime(self.root)
+            if not hasattr(self, '_last_mtime') or mtime > self._last_mtime:
+                self.refresh_library()
+                self._last_mtime = mtime
+        except Exception:
+            self.refresh_library()
+
     def get_numbered_items(self):
         """Returns list of (index, artist, album, path) for selection"""
         return [(i+1, item["artist"], item["album"], item["path"]) for i, item in enumerate(self.items)]
@@ -842,6 +866,7 @@ class MusicDownloader:
     def __init__(self):
         self._check_ffmpeg()
         self.library = LibraryManager(DOWNLOAD_ROOT)
+        self.library.refresh_library_if_changed()
         self.mp3_mode = CONFIG.get("mp3_mode", False)
         self.music_only = CONFIG.get("music_only", False)
         self.lyrics_mode = CONFIG.get("lyrics_mode", True)
@@ -898,8 +923,7 @@ class MusicDownloader:
             return cookies_path
         return None
 
-    def _yt_dlp_cmd(self, outtmpl, url, fmt="mp3"):
-        # Base command builder (Shared)
+    def _yt_dlp_cmd(self, outtmpl, url, fmt, folder):
         cmd = [
             YT_DLP_CMD,
             "--no-warnings",
@@ -910,6 +934,7 @@ class MusicDownloader:
             "--add-metadata",
             "--windows-filenames", # Ensure compatible filenames
             "--js-runtimes", "node",  # Use Node.js for YouTube JS signature solving
+            "--download-archive", os.path.join(folder, ".downloaded.txt")
         ]
         
         # Cookie Config: cookies.txt file > cookies_browser config
@@ -1017,6 +1042,50 @@ class MusicDownloader:
             for filepath in sorted(glob.glob(os.path.join(folder, pattern))):
                 self._process_single_file_cover(filepath, stats=stats)
 
+    def _process_single_file_lyrics(self, filepath, stats=None):
+        if not self.lyrics_mode or not self.lrc_fetcher:
+            return
+        try:
+            p = Path(filepath)
+            lrc_path = p.with_suffix(".lrc")
+            if lrc_path.exists():
+                if stats: stats.lyrics_skipped += 1
+                return
+            
+            meta = self.lrc_fetcher.get_metadata(str(filepath))
+            if not meta.get("artist") or not meta.get("title"):
+                if stats: stats.lyrics_missing += 1
+                return
+                
+            ok = self.lrc_fetcher.fetch_lrc(meta["artist"], meta["title"], meta.get("album"), str(lrc_path))
+            if stats:
+                if ok: stats.lyrics_found += 1
+                else: stats.lyrics_missing += 1
+        except Exception as e:
+            logging.error(f"Lyrics Error: {e}")
+
+    def _process_single_file_lyrics(self, filepath, stats=None):
+        if not self.lyrics_mode or not self.lrc_fetcher:
+            return
+        try:
+            p = Path(filepath)
+            lrc_path = p.with_suffix(".lrc")
+            if lrc_path.exists():
+                if stats: stats.lyrics_skipped += 1
+                return
+            
+            meta = self.lrc_fetcher.get_metadata(str(filepath))
+            if not meta.get("artist") or not meta.get("title"):
+                if stats: stats.lyrics_missing += 1
+                return
+                
+            ok = self.lrc_fetcher.fetch_lrc(meta["artist"], meta["title"], meta.get("album"), str(lrc_path))
+            if stats:
+                if ok: stats.lyrics_found += 1
+                else: stats.lyrics_missing += 1
+        except Exception as e:
+            logging.error(f"Lyrics Error: {e}")
+
     def _process_single_file_cover(self, filepath, stats=None):
         base = os.path.splitext(filepath)[0]
         folder = os.path.dirname(filepath)
@@ -1116,7 +1185,11 @@ class MusicDownloader:
         re.IGNORECASE
     )
     YT_PATTERN_DESTINATION = re.compile(
-        r'\[ExtractAudio\]\s+Destination:\s+(.+)$',
+        r'\[(?:ExtractAudio|download)\]\s+Destination:\s+(.+)$',
+        re.IGNORECASE
+    )
+    YT_PATTERN_SKIPPED = re.compile(
+        r'(has already been downloaded|has already been recorded in the archive)',
         re.IGNORECASE
     )
     YT_PATTERN_EXTRACTING = re.compile(
@@ -1174,12 +1247,17 @@ class MusicDownloader:
                 "count": int(m.group(2)) if m.group(2) else 0,
             })
 
-        # Audio extraction finished
+        # Audio extraction or download finished
         m = self.YT_PATTERN_DESTINATION.search(s)
         if m:
             return ("EXTRACT", {
                 "destination": m.group(1).strip(),
             })
+
+        # Track skipped (already downloaded)
+        m = self.YT_PATTERN_SKIPPED.search(s)
+        if m:
+            return ("SKIPPED", {})
 
         # Phase hints
         if self.YT_PATTERN_EXTRACTING.search(s):
@@ -1224,7 +1302,7 @@ class MusicDownloader:
         tmpl_str = CONFIG.get("filename_template", "%(playlist_index|00|)s %(title)s.%(ext)s")
         outtmpl = os.path.join(folder, tmpl_str)
 
-        cmd = self._yt_dlp_cmd(outtmpl, link, "mp3" if self.mp3_mode else "flac")
+        cmd = self._yt_dlp_cmd(outtmpl, link, "mp3" if self.mp3_mode else "flac", folder)
 
         start_ts = time.time()
         # In live mode, the live object handles the header itself
@@ -1291,6 +1369,7 @@ class MusicDownloader:
 
                     elif event_type == "EXTRACT":
                         dest = os.path.basename(payload.get("destination", ""))
+                        full_dest = payload.get("destination", "")
                         state["last_track_title"] = dest
                         stats.tracks_downloaded += 1
                         idx = state["item_index"] if state["item_index"] else 1
@@ -1299,7 +1378,24 @@ class MusicDownloader:
                             size_str = self._human_size(dest)
                         except Exception:
                             size_str = ""
-                        live.finish_track(idx, dest, size_str=size_str)
+                            
+                        # Real-time Post-Processing
+                        if full_dest and CONFIG.get("realtime_processing", True):
+                            abs_dest = os.path.join(folder, dest) if not os.path.isabs(full_dest) else full_dest
+                            if os.path.exists(abs_dest):
+                                if live:
+                                    live.update_status(f"  {Colors.WARNING}🎨 Processing metadata for: {dest}{Colors.ENDC}")
+                                self._process_single_file_cover(abs_dest, stats=stats)
+                                self._process_single_file_lyrics(abs_dest, stats=stats)
+                                
+                        if live:
+                            live.finish_track(idx, dest, size_str=size_str)
+
+                    elif event_type == "SKIPPED":
+                        stats.tracks_skipped += 1
+                        idx = state["item_index"] if state["item_index"] else 1
+                        if live:
+                            live.log(f"  {Colors.WARNING}⏭️  Skipped Track {idx} (Already downloaded){Colors.ENDC}")
 
                     elif event_type == "PHASE":
                         # Show phase above the in-place line if we have a current track
@@ -1426,6 +1522,18 @@ class MusicDownloader:
         idx_lock = threading.Lock()
         done = [0]  # mutable counter for completed albums
 
+        queue_file = os.path.join(SCRIPT_DIR, "batch_queue.json")
+
+        def _save_queue(remaining):
+            try:
+                with open(queue_file, "w") as f:
+                    json.dump(remaining, f)
+            except Exception:
+                pass
+
+        _save_queue(queue_items)
+        pending = list(queue_items)
+
         def _run_one(album_idx, folder, url):
             # Print a clear header for this album
             album_name = os.path.basename(folder)
@@ -1449,6 +1557,12 @@ class MusicDownloader:
                 with idx_lock:
                     done[0] += 1
                     pct = done[0] * 100 // len(queue_items)
+                    # Remove from pending queue to support resume
+                    item = (folder, url)
+                    if item in pending:
+                        pending.remove(item)
+                    _save_queue(pending)
+
                 sys.stdout.write(
                     f"  {Colors.OKCYAN}📦 Albums done: "
                     f"{done[0]}/{len(queue_items)} ({pct}%){Colors.ENDC}\n"
@@ -1486,6 +1600,9 @@ class MusicDownloader:
             f"{success_count} OK, {fail_count} failed{Colors.ENDC}\n"
         )
         sys.stdout.flush()
+        
+        if os.path.exists(queue_file):
+            safe_file_op(os.remove, queue_file)
 
     def _parallel_worker(self, folder, url, live):
         """Worker for the parallel batch: prints to the shared LiveStatus feed."""
@@ -1674,7 +1791,7 @@ class MusicDownloader:
                         if 1 <= num <= len(items):
                             selected.append(items[num-1])
                 print(f"{Colors.OKGREEN}✅ {len(selected)} items selected{Colors.ENDC}")
-            except:
+            except (ValueError, IndexError):
                 print(f"{Colors.FAIL}❌ Invalid: {choice}{Colors.ENDC}")
 
         if selected:
@@ -1753,7 +1870,7 @@ def main():
 
                     if folder_name:
                         downloader.download_single_url(folder_name, link)
-                        downloader.library = LibraryManager(DOWNLOAD_ROOT)
+                        downloader.library.refresh_library_if_changed()
 
             elif choice == "2":
                 # Ask for URL first so we can auto-fetch the title
@@ -1791,7 +1908,7 @@ def main():
 
                     if playlist_name:
                         downloader.download_playlist_url(playlist_name, link)
-                        downloader.library = LibraryManager(DOWNLOAD_ROOT)
+                        downloader.library.refresh_library_if_changed()
             
             elif choice == "3":
                 if HAS_RICH:
@@ -1801,50 +1918,9 @@ def main():
                     
                 if playlist_name:
                     downloader.interactive_playlist_selector(playlist_name)
-                    downloader.library = LibraryManager(DOWNLOAD_ROOT)
+                    downloader.library.refresh_library_if_changed()
 
             elif choice == "4":
-                if HAS_RICH:
-                    artist_name = Console().input("[bold yellow]🎤 Artist Name: [/]").strip()
-                else:
-                    artist_name = input("🎤 Artist Name: ").strip()
-                    
-                if artist_name:
-                    print(f"{Colors.OKCYAN}Paste album URLs one at a time. Type 'GO' when finished.{Colors.ENDC}")
-                    
-                    queue = []
-                    while True:
-                        lnk = input("🔗 Album URL (or 'GO'): ").strip()
-                        if lnk.upper() == "GO":
-                            break
-                        if not lnk:
-                            continue
-
-                        # Auto-fetch album title
-                        fetched_alb = None
-                        spinner = Spinner()
-                        spinner.start("🔍 Fetching album title…")
-                        try:
-                            fetched_alb = downloader._fetch_playlist_title(lnk)
-                        finally:
-                            spinner.stop(fetched_alb is not None)
-
-                        if fetched_alb:
-                            print(f"{Colors.OKCYAN}💿 Detected album: {Colors.OKGREEN}{fetched_alb}{Colors.ENDC}")
-                            alb = input(f"💿 Album name [Enter to use '{fetched_alb}']: ").strip()
-                            alb = alb if alb else fetched_alb
-                        else:
-                            print(f"{Colors.WARNING}⚠️  Could not auto-fetch album title.{Colors.ENDC}")
-                            alb = input("💿 Album Name: ").strip()
-
-                        if not alb:
-                            continue
-
-                        # Fix: Use Absolute Path for Batch Downloads
-                        full_album_path = os.path.join(DOWNLOAD_ROOT, artist_name, alb)
-                        queue.append((full_album_path, lnk))
-                        print(f"{Colors.OKGREEN}  ✅ Queued: {artist_name} / {alb}{Colors.ENDC}")
-                    
                     if queue:
                         downloader.download_queue_parallel(queue)
                         downloader.library = LibraryManager(DOWNLOAD_ROOT)
@@ -1897,6 +1973,32 @@ def main():
                     subprocess.run([YT_DLP_CMD, "-U"], check=False)
                 except Exception as e:
                     print(f"{Colors.FAIL}❌ Update failed: {e}{Colors.ENDC}")
+
+            elif choice == "s":
+                print(f"\n{Colors.HEADER}⚙️  Settings Editor{Colors.ENDC}")
+                keys = list(CONFIG.keys())
+                for i, k in enumerate(keys, 1):
+                    print(f"  {Colors.OKCYAN}{i}) {k}{Colors.ENDC} = {CONFIG[k]}")
+                print("  0) Back")
+                
+                s_choice = input("\nSelect setting to change: ").strip()
+                if s_choice.isdigit() and 1 <= int(s_choice) <= len(keys):
+                    k = keys[int(s_choice) - 1]
+                    curr = CONFIG[k]
+                    if isinstance(curr, bool):
+                        CONFIG[k] = not curr
+                        print(f"  {Colors.OKGREEN}Toggled {k} to {CONFIG[k]}{Colors.ENDC}")
+                    elif isinstance(curr, int):
+                        new_val = input(f"  New integer value for {k} (current: {curr}): ").strip()
+                        if new_val.isdigit():
+                            CONFIG[k] = int(new_val)
+                            print(f"  {Colors.OKGREEN}Updated {k} to {CONFIG[k]}{Colors.ENDC}")
+                    else:
+                        new_val = input(f"  New string value for {k} (current: '{curr}'): ").strip()
+                        if new_val:
+                            CONFIG[k] = new_val
+                            print(f"  {Colors.OKGREEN}Updated {k} to '{CONFIG[k]}'{Colors.ENDC}")
+                    CONF_MANAGER.save_config()
 
             elif choice == "9" or choice == "c":
                  downloader.cleanup_junk()

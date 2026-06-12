@@ -166,6 +166,8 @@ class LRCFetcher:
         """Scan folder for audio files and fetch lyrics.
         Returns (found, missing, skipped) counts.
         """
+        import concurrent.futures
+        
         folder = Path(folder_path)
         found = missing = skipped = 0
 
@@ -185,13 +187,19 @@ class LRCFetcher:
 
         print(f"Found {len(files)} audio files.")
 
+        to_fetch = []
         for filepath in files:
             lrc_path = filepath.with_suffix(".lrc")
             if lrc_path.exists():
                 print(f"{Colors.OKBLUE}⏭️  Exists: {filepath.name}{Colors.ENDC}")
                 skipped += 1
-                continue
+            else:
+                to_fetch.append(filepath)
 
+        if not to_fetch:
+            return found, missing, skipped
+
+        def _fetch_worker(filepath):
             print(f"Processing: {filepath.name}")
             meta = self.get_metadata(str(filepath))
 
@@ -201,12 +209,16 @@ class LRCFetcher:
 
             print(f"  🔍 Query: {artist} - {title} (Alb: {album})")
 
-            ok = self.fetch_lrc(artist, title, album, lrc_path)
-            if ok:
-                found += 1
-            else:
-                missing += 1
-            time.sleep(0.5)  # Rate limit politeness
+            lrc_path = filepath.with_suffix(".lrc")
+            return self.fetch_lrc(artist, title, album, lrc_path)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            results = executor.map(_fetch_worker, to_fetch)
+            for ok in results:
+                if ok:
+                    found += 1
+                else:
+                    missing += 1
 
         return found, missing, skipped
 
